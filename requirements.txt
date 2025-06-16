@@ -1,0 +1,21 @@
+# Python 3.11 호환 최신 안정 버전 (2025년 6월 기준)
+
+# --- Core Application Framework ---
+# 웹 UI를 위한 체인릿
+chainlit~=1.1.304
+
+# --- LangChain Ecosystem ---
+# 랭체인 코어 라이브러리
+langchain~=0.2.5
+# Anthropic 모델 연동을 위한 라이브러리
+langchain-anthropic~=0.1.15
+# 에이전트 구성을 위한 랭그래프
+langgraph~=0.2.0
+
+# --- Tool Integration ---
+# MCP 서버-클라이언트 어댑터
+langchain_mcp_adapters~=0.1.2
+
+# --- Data Handling ---
+# 데이터 분석 및 조작을 위한 판다스
+pandas~=2.2.2

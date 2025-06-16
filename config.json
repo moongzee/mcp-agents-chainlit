@@ -1,0 +1,9 @@
+{
+    "korea-weather": {
+      "command": "python",
+      "args": [
+        "./korea_weather.py"
+      ],
+      "transport": "stdio"
+    }
+  }
