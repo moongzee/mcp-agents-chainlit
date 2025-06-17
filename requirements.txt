@@ -1,18 +1,28 @@
-# --- Core Framework ---
-chainlit~=1.1.404  # 최신 안정 버전
-
-# --- LangChain Ecosystem ---
-langchain-core>=0.3.58,<1.0.0
+# --- 핵심 패키지 ---
+chainlit==1.3.2
 langchain==0.3.25
+langchain-core==0.3.65
 langchain-anthropic==0.3.15
-langgraph==0.3.4
 langchain-mcp-adapters==0.1.7
 
-# --- Data Handling ---
+# --- LangGraph 관련 ---
+langgraph==0.3.4
+langgraph-prebuilt==0.1.8
+langgraph-sdk==0.1.47
+langgraph-checkpoint==2.1.0
+
+# --- MCP 플랫폼 ---
+mcp==1.9.4
+
+# --- 데이터 처리 ---
 pandas==2.2.2
+numpy==1.26.4
 
-# --- MCP 연동 ---
-mcp>=1.9.2
+# --- 모델 설정 ---
+pydantic==2.7.4
+pydantic-core==2.18.4
+pydantic-settings==2.9.1
+typing-extensions   # 버전 명시 X
 
-# --- 기타 유틸 ---
-tenacity>=8.2.0
+# --- 안정성 ---
+tenacity==8.2.3
