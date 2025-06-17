@@ -5,5 +5,12 @@
         "./korea_weather.py"
       ],
       "transport": "stdio"
+    },
+    "snowflake-cortex": {
+      "command": "python",
+      "args": [
+        "./cortex_agents.py"
+      ],
+      "transport": "stdio"
     }
   }

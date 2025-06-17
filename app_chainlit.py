@@ -13,15 +13,22 @@ import os
 import hashlib
 from typing import List, Any, Dict, Optional
 from mcp import ClientSession
+import re
+import codecs
 
 # --- 2. LangChain 관련 라이브러리 임포트 ---
 from langchain_anthropic import ChatAnthropic
+from langchain.memory import ConversationSummaryBufferMemory
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.runnables import RunnableConfig
 from langchain_core.callbacks import BaseCallbackHandler
 from utils import trimming_node
+
+# --- 3. MCP 타입 임포트 추가 ---
+from mcp.types import CallToolResult, TextContent
 
 # --- 3. 설정 파일 로드 및 데이터베이스 초기화 ---
 from dotenv import load_dotenv
@@ -211,13 +218,13 @@ init_database()
 @cl.password_auth_callback
 def auth_callback(username: str, password: str) -> Optional[cl.User]:
     """사용자 인증 콜백"""
-    #print(f"DEBUG: 로그인 시도 - 사용자명: {username}")
+    print(f"DEBUG: 로그인 시도 - 사용자명: {username}")
     
     user_data = authenticate_user(username, password)
-    #print(f"DEBUG: 인증 결과: {user_data}")
+    print(f"DEBUG: 인증 결과: {user_data}")
     
     if user_data:
-        #print(f"DEBUG: 로그인 성공 - {user_data['display_name']}")
+        print(f"DEBUG: 로그인 성공 - {user_data['display_name']}")
         
         # 🔧 Chainlit User 객체 생성 - 모든 방법 시도
         user = cl.User(
@@ -233,14 +240,14 @@ def auth_callback(username: str, password: str) -> Optional[cl.User]:
         # display_name 속성 직접 설정 시도
         try:
             user.display_name = user_data["display_name"]
-            #print(f"DEBUG: display_name 직접 설정 완료: {user_data['display_name']}")
+            print(f"DEBUG: display_name 직접 설정 완료: {user_data['display_name']}")
         except Exception as e:
             print(f"DEBUG: display_name 설정 실패: {e}")
         
-        #print(f"DEBUG: 최종 생성된 User 객체:")
-        #print(f"  - identifier: {user.identifier}")
-        #print(f"  - display_name: {getattr(user, 'display_name', 'None')}")
-        #print(f"  - metadata: {user.metadata}")
+        print(f"DEBUG: 최종 생성된 User 객체:")
+        print(f"  - identifier: {user.identifier}")
+        print(f"  - display_name: {getattr(user, 'display_name', 'None')}")
+        print(f"  - metadata: {user.metadata}")
         
         return user
     else:
@@ -267,7 +274,7 @@ class KoreanLangGraphCallbackHandler(BaseCallbackHandler):
         
         # 첫 번째 체인 시작 시에만 메인 단계 생성
         if self.chain_count == 1:
-            self.main_step = cl.Step(name="생각하는중", type="run")
+            self.main_step = cl.Step(name="소요시간로그", type="run")
             await self.main_step.send()
             self.start_time = time.time()
         
@@ -298,7 +305,7 @@ class KoreanLangGraphCallbackHandler(BaseCallbackHandler):
         # 모든 체인이 끝났을 때 메인 단계 업데이트
         if self.chain_count == 0 and self.main_step and self.start_time:
             elapsed = time.time() - self.start_time
-            self.main_step.name = "생각하는과정표시"
+            self.main_step.name = "소요시간"
             self.main_step.output = f"총 소요시간: {elapsed:.2f}초"
             await self.main_step.update()
     
@@ -342,7 +349,6 @@ class KoreanLangGraphCallbackHandler(BaseCallbackHandler):
                 type="tool",
                 parent_id=self.main_step.id
             )
-            step.input = str(input_str)
             await step.send()
             self.current_steps[run_id] = step
     
@@ -353,10 +359,10 @@ class KoreanLangGraphCallbackHandler(BaseCallbackHandler):
         if run_id in self.step_timings and run_id in self.current_steps:
             elapsed = time.time() - self.step_timings[run_id]
             step = self.current_steps[run_id]
-            output_preview = str(output)[:200] + "..." if len(str(output)) > 200 else str(output)
-            step.output = f"완료 (소요시간: {elapsed:.2f}초)\n\n결과: {output_preview}"
+            step.output = f"완료 (소요시간: {elapsed:.2f}초)"
             await step.update()
             del self.current_steps[run_id]
+
 
 # --- 6. MCP 연결 핸들러 정의 ---
 
@@ -382,7 +388,6 @@ async def on_mcp_connect(connection, session: ClientSession):
             cl.user_session.set("model", model)
 
         from langchain_core.tools import Tool
-        
         all_langchain_tools = []
         for conn_name, tools in mcp_tools.items():
             for tool_info in tools:
@@ -407,15 +412,43 @@ async def on_mcp_connect(connection, session: ClientSession):
                     )
                 )
 
-        agent = create_react_agent(
+        memory = ConversationSummaryBufferMemory(
+            llm=model,
+            return_messages=True,
+            memory_key="chat_history",
+            max_token_limit=8000
+        )
+        
+        async_memory = AsyncConversationSummaryBufferMemory(memory)
+
+        def get_session_history(session_id):
+            return async_memory
+        
+        agent_core = create_react_agent(
             model,
             all_langchain_tools,
             checkpointer=MemorySaver(),
             prompt=SYSTEM_PROMPT,
             pre_model_hook=trimming_node
         )
+
+        agent = RunnableWithMessageHistory(
+            runnable=agent_core,
+            get_session_history=get_session_history,
+            input_messages_key="messages",
+            history_messages_key="chat_history"
+        )
+
+        # 반드시 memory를 세션에 저장!
+        cl.user_session.set("memory", memory)
         cl.user_session.set("agent", agent)
-        
+
+        # agent 실행 직전
+        memory = cl.user_session.get("memory")
+        if memory:
+            print("=== [DEBUG] 현재 메모리 buffer:", getattr(memory, "buffer", None))
+            print("=== [DEBUG] 현재 moving_summary_buffer:", getattr(memory, "moving_summary_buffer", None))
+            print("=== [DEBUG] load_memory_variables 결과:", memory.load_memory_variables({}))
 
     except Exception as e:
         error_msg = f"MCP 연결 처리 중 오류 발생: {e}"
@@ -434,25 +467,10 @@ async def setup_agent(settings):
     """설정 업데이트 시 에이전트 재설정"""
     pass
 
-# config.json에서 MCP 서버 기본값 읽기
-DEFAULT_MCP_NAME = None
-DEFAULT_MCP_COMMAND = None
-DEFAULT_MCP_ARGS = None
-DEFAULT_MCP_TRANSPORT = None
-
-if os.path.exists("config.json"):
-    with open("config.json", "r", encoding="utf-8") as f:
-        config = json.load(f)
-        for name, info in config.items():
-            DEFAULT_MCP_NAME = name
-            DEFAULT_MCP_COMMAND = info.get("command")
-            DEFAULT_MCP_ARGS = info.get("args", [])
-            DEFAULT_MCP_TRANSPORT = info.get("transport")
-            break
-
 @cl.on_chat_start
 async def on_chat_start():
     """채팅 시작 시 초기화 및 사이드바 설정"""
+    # 현재 사용자 정보 가져오기
     user = cl.user_session.get("user")
     if not user:
         user = cl.context.session.user
@@ -462,34 +480,25 @@ async def on_chat_start():
         await cl.Message(content="로그인이 필요합니다. 다시 로그인해주세요.").send()
         return
     
-    #print(f"DEBUG: 사용자 정보 - {user}")
-    #print(f"DEBUG: 사용자 메타데이터 - {user.metadata}")
-    #print(f"DEBUG: user_id 확인 - {user.metadata.get('user_id')}")
-    
     cl.user_session.set("mcp_tools", {})
     cl.user_session.set("message_count", 0)
-
-    # config.json의 MCP 서버를 기본값으로 등록
-    if DEFAULT_MCP_NAME and DEFAULT_MCP_COMMAND:
-        mcp_servers = cl.user_session.get("mcp_servers", {})
-        mcp_servers[DEFAULT_MCP_NAME] = {
-            "command": DEFAULT_MCP_COMMAND,
-            "args": DEFAULT_MCP_ARGS,
-            "transport": DEFAULT_MCP_TRANSPORT
-        }
-        cl.user_session.set("mcp_servers", mcp_servers)
     
     # 사용자별 채팅 기록 사이드바 설정
     await setup_chat_history_sidebar(user.identifier)
     
+    # 환영 메시지 - 표시명 우선, 없으면 사용자명, 없으면 기본값
     display_name = user.metadata.get("display_name") or user.metadata.get("username") or "사용자"
+    
+    # 🔧 사용자 정보 업데이트 시도
     try:
+        # Chainlit에서 사용자 표시명을 강제로 설정
         user.display_name = display_name
+        
     except Exception as e:
         print(f"DEBUG: 사용자 표시명 설정 실패: {e}")
+    
     await cl.Message(content=f"안녕하세요 {display_name}님! NOA 입니다. 무엇이든 물어보세요 😊").send()
 
-## 채팅기록 보여주기용 기능 안
 async def setup_chat_history_sidebar(user_identifier: str):
     """사용자별 채팅 기록을 초기 메시지로 표시"""
     user = cl.user_session.get("user") or cl.context.session.user
@@ -501,20 +510,15 @@ async def setup_chat_history_sidebar(user_identifier: str):
     
     # 방법 1: metadata에서 user_id 찾기
     actual_user_id = user.metadata.get("user_id")
-    if actual_user_id:
-        print(f"DEBUG: metadata에서 user_id 찾음: {actual_user_id}")
     
     # 방법 2: metadata에서 db_id 찾기 (백업)
     if not actual_user_id:
         actual_user_id = user.metadata.get("db_id")
-        if actual_user_id:
-            print(f"DEBUG: metadata에서 db_id 찾음: {actual_user_id}")
-    
+            #print(f"DEBUG: metadata에서 db_id 찾음: {actual_user_id}")
     # 방법 3: 이메일로 직접 데이터베이스에서 조회
     if not actual_user_id:
         username = user.metadata.get("username") or user.identifier
         if username and "@" in username:  # 이메일인 경우
-            print(f"DEBUG: 이메일로 user_id 조회 시도: {username}")
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
@@ -522,36 +526,16 @@ async def setup_chat_history_sidebar(user_identifier: str):
             conn.close()
             if result:
                 actual_user_id = result[0]
-                print(f"DEBUG: 데이터베이스에서 user_id 찾음: {actual_user_id}")
     
     # 방법 4: identifier가 해시값인 경우 그대로 사용
     if not actual_user_id and len(user.identifier) == 32:  # MD5 해시 길이
         actual_user_id = user.identifier
-        print(f"DEBUG: identifier를 user_id로 사용: {actual_user_id}")
-    
+
     if not actual_user_id:
         print("DEBUG: 모든 방법으로 user_id를 찾을 수 없음")
         return
         
     sessions = get_chat_sessions(actual_user_id)
-    print(f"DEBUG: 사용자 {user.metadata.get('display_name', 'Unknown')}의 채팅 기록 {len(sessions)}개 로드됨")
-    
-    # if sessions:
-    #     history_content = "## 📚 채팅 기록\n\n"
-    #     history_content += "*이전 대화들:*\n\n"
-        
-    #     for session_id, title, created_at, message_count in sessions:
-    #         created_date = datetime.fromisoformat(created_at).strftime("%m/%d %H:%M")
-    #         history_content += f"• **{title}** ({message_count}개 메시지) - {created_date}\n"
-        
-    #     history_content += f"\n총 {len(sessions)}개의 대화가 저장되어 있습니다."
-    #     history_content += "\n\n*새로운 대화를 시작하거나 `/기록`을 입력하여 상세 정보를 확인하세요.*"
-        
-    #     # 채팅 기록을 시스템 메시지로 표시
-    #     await cl.Message(
-    #         content=history_content,
-    #         author="📚 System"
-    #     ).send()
     
     # 세션에 저장 (실제 user_id 포함)
     cl.user_session.set("chat_sessions", sessions)
@@ -576,6 +560,7 @@ async def on_chat_end():
         actual_user_id = user.metadata.get("user_id", user.identifier)
         save_chat_session(session_id, actual_user_id, title)
 
+
 @cl.on_message
 async def on_message(message: cl.Message):
     """사용자 메시지 처리"""
@@ -598,24 +583,31 @@ async def on_message(message: cl.Message):
     session_id = cl.context.session.id
     save_message(session_id, "user", message.content)
     
+    # 디버그: 메모리 상태 출력
+    memory = cl.user_session.get("memory")
+    if memory:
+        print("=== [DEBUG][on_message] 현재 메모리 buffer:", getattr(memory, "buffer", None))
+        print("=== [DEBUG][on_message] 현재 moving_summary_buffer:", getattr(memory, "moving_summary_buffer", None))
+        print("=== [DEBUG][on_message] load_memory_variables 결과:", memory.load_memory_variables({}))
+
     agent = cl.user_session.get("agent")
     if not agent:
         await cl.Message(content="에이전트가 아직 설정되지 않았습니다. 먼저 MCP 서버에 연결해주세요.").send()
         return
 
-    # Chainlit의 기본 LangGraph 트레이스를 비활성화하고 커스텀만 사용
-    korean_callback = KoreanLangGraphCallbackHandler()
-    
+    # 🔧 기본 Chainlit 콜백 사용
     config = RunnableConfig(
         recursion_limit=100,
         thread_id=cl.context.session.id,
-        callbacks=[korean_callback]  # 커스텀 콜백만 사용 (기본 Chainlit 콜백 제거)
+        callbacks=[ KoreanLangGraphCallbackHandler(), cl.LangchainCallbackHandler()],
+        configurable={"session_id": cl.context.session.id}
     )
-    
+
     # 최종 응답 메시지 처리
     final_msg = cl.Message(content="", author="Assistant")
     has_streamed_content = False
     all_final_responses = []
+    table_elements = None
     
     async for event in agent.astream_events(
         {"messages": [HumanMessage(content=message.content)]},
@@ -623,7 +615,6 @@ async def on_message(message: cl.Message):
         version="v2"
     ):
         kind = event["event"]
-        print(f"DEBUG: Event - {kind}")
         
         if kind == "on_llm_start":
             if not final_msg.id:
@@ -631,7 +622,6 @@ async def on_message(message: cl.Message):
                 
         elif kind == "on_llm_stream" or kind == "on_chat_model_stream":
             chunk = event["data"]["chunk"]
-            print(f"DEBUG: {kind} - chunk: {chunk}")
             if isinstance(chunk.content, str) and chunk.content.strip():
                 await final_msg.stream_token(chunk.content)
                 has_streamed_content = True
@@ -641,11 +631,65 @@ async def on_message(message: cl.Message):
                         await final_msg.stream_token(part.get("text", ""))
                         has_streamed_content = True
         
+        elif kind == "on_tool_end":
+            step = cl.user_session.get(f"tool_step_{event['run_id']}")
+            tool_output_object = event["data"].get("output")
+            
+            json_string_to_parse = None
+            raw_content = None
+            if isinstance(tool_output_object, ToolMessage):
+                raw_content = tool_output_object.content
+            if isinstance(raw_content, CallToolResult):
+                for content_item in raw_content.content:
+                    if isinstance(content_item, TextContent):
+                        json_string_to_parse = content_item.text
+                        break
+            elif isinstance(raw_content, str):
+                # 반드시 text='...' 부분만 추출
+                match = re.search(r"text='(.*?)', annotations=None", raw_content, re.DOTALL)
+                if match:
+                    json_string_to_parse = match.group(1)
+                else:
+                    print("정규표현식 매칭 실패! 파싱 시도하지 않음.")
+                    json_string_to_parse = None
+
+
+            if step:
+                step.output = json_string_to_parse or str(raw_content)
+
+            if event["name"] == "run_cortex_agents" and json_string_to_parse and json_string_to_parse.strip():
+                try:
+                    # 이스케이프 
+                    unescaped = codecs.decode(json_string_to_parse, "unicode_escape")
+                    if isinstance(unescaped, str):
+                        unescaped = unescaped.encode("latin1").decode("utf-8")
+                    # JSON 파싱
+                    tool_result_json = json.loads(unescaped)
+                    chart_data = tool_result_json.get("results", {})
+                    elements = []
+                    if chart_data and chart_data.get("data"):
+                        columns = [col["name"] for col in chart_data["resultSetMetaData"]["rowType"]]
+                        df = pd.DataFrame(chart_data["data"], columns=columns)
+                        elements.append(cl.Dataframe(data=df, name="상세 데이터", display="inline"))
+                        string_io = io.StringIO()
+                        df.to_csv(string_io, index=False, encoding='utf-8-sig')
+                        csv_bytes = string_io.getvalue().encode('utf-8-sig')
+                        elements.append(cl.File(
+                            name=f"report_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            content=csv_bytes,
+                            display="inline"
+                        ))
+                    if elements and table_elements is None:
+                        table_elements = elements
+                except Exception as e:
+                    print(f"'{event['name']}' 툴 결과 처리 중 오류 발생:")
+                    traceback.print_exc()
+        
+            if step:
+                await step.update()
+
         elif kind == "on_llm_end" or kind == "on_chat_model_end":
             output = event["data"].get("output")
-            print(f"DEBUG: {kind} - output: {output}")
-            print(f"DEBUG: {kind} - has_streamed_content: {has_streamed_content}")
-            
             if output:
                 final_answer = ""
                 if hasattr(output, 'content'):
@@ -658,22 +702,23 @@ async def on_message(message: cl.Message):
                 
                 if final_answer.strip():
                     all_final_responses.append(final_answer)
-                    print(f"DEBUG: 수집된 최종 응답: {final_answer[:100]}...")
     
-    # 스트림 완료 후 최종 응답 처리
-    print(f"DEBUG: 스트림 완료 - has_streamed_content: {has_streamed_content}")
-    print(f"DEBUG: 스트림 완료 - all_final_responses: {len(all_final_responses)}개")
-    
+    if table_elements:
+        await cl.Message(
+                    content="Data",
+                    elements=table_elements,
+                    author="Tool"
+                ).send()
+        table_elements = None  # 전송 후 초기화
+
     final_response = ""
     if not has_streamed_content and all_final_responses:
         # 스트리밍이 없었다면 수집된 모든 응답을 합쳐서 전송
         final_response = "\n\n".join(all_final_responses)
-        print(f"DEBUG: 최종 응답 전송: {final_response[:200]}...")
         await cl.Message(content=final_response, author="Assistant").send()
     elif not has_streamed_content and not all_final_responses:
         # 아무 응답도 없었다면 기본 메시지
         final_response = "죄송합니다. 응답을 생성하는 데 문제가 발생했습니다."
-        print("DEBUG: 응답이 없어서 기본 메시지 전송")
         await cl.Message(content=final_response, author="Assistant").send()
     else:
         # 스트리밍된 내용이 있는 경우 final_msg의 내용을 사용
@@ -682,5 +727,23 @@ async def on_message(message: cl.Message):
     # 어시스턴트 응답을 DB에 저장
     if final_response:
         save_message(session_id, "assistant", final_response)
+
+    await final_msg.update()
+
+class AsyncConversationSummaryBufferMemory:
+    def __init__(self, memory):
+        self.memory = memory
+
+    async def aget_messages(self):
+        variables = self.memory.load_memory_variables({})
+        summary = variables["chat_history"]
+        # summary가 str이면 AIMessage로 감싸서 리스트로 반환
+        if isinstance(summary, str):
+            return [AIMessage(content=summary)]
+        # 혹시 리스트면 그대로 반환
+        return summary
+
+    def __getattr__(self, name):
+        return getattr(self.memory, name)
 
 
