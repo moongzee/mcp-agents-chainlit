@@ -132,10 +132,12 @@ async def run_cortex_agents(query: str) -> Dict[str, Any]:
         "experimental": {},
         "tools": [
             {"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}},
+            {"tool_spec": {"type": "cortex_search",            "name": "Search1"}},
             {"tool_spec": {"type": "sql_exec", "name": "sql_execution_tool"}},
         ],
         "tool_resources": {
             "Analyst1": {"semantic_model_file": SEMANTIC_MODEL_FILE},
+            "Search1":  {"name": CORTEX_SEARCH_SERVICE},
         },
         "tool_choice": {"type": "auto"},
         "messages": [
