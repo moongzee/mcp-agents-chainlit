@@ -86,15 +86,15 @@ async def execute_sql(sql: str) -> Dict[str, Any]:
         sql_api_url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/statements"
         sql_payload = {
             "statement": sql.replace(";", ""),
-            "timeout": 60
+            "timeout": 120
         }
-        response = requests.post(
-            sql_api_url,
-            json=sql_payload,
-            headers=API_HEADERS,
-            params={"requestId": request_id},
-            verify=False
-        )
+        async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
+            response = await client.post(
+                sql_api_url,
+                json=sql_payload,
+                headers=API_HEADERS,
+                params={"requestId": request_id},
+            )
         logging.info("SQL API 요청: %s %s", sql_api_url, sql_payload)
         logging.info("SQL API 응답: %s %s", response.status_code, response.text)
         if response.status_code == 200:
@@ -137,7 +137,13 @@ async def run_cortex_agents(query: str) -> Dict[str, Any]:
         ],
         "tool_resources": {
             "Analyst1": {"semantic_model_file": SEMANTIC_MODEL_FILE},
-            "Search1":  {"name": CORTEX_SEARCH_SERVICE},
+            "Search1": {
+                "name": CORTEX_SEARCH_SERVICE,
+                "max_results": 10,
+                "title_column": "relative_path",
+                "id_column": "doc_id",
+                "filter": {"@eq": {"language": "Korean"}}
+                }
         },
         "tool_choice": {"type": "auto"},
         "messages": [
