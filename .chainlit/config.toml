@@ -55,7 +55,7 @@ enabled = true
 [features.mcp.stdio]
 enabled = true
 # Only the executables in the allow list can be used for MCP stdio server.
-allowed_executables = [ "npx", "uvx", "python", "docker" ]
+allowed_executables = [ "npx", "uvx", "python", "docker"]
 
 [UI]
 # Name of the assistant.
@@ -84,6 +84,7 @@ custom_css = "/public/custom.css"
 
 # Specify a JavaScript file that can be used to customize the user interface.
 custom_js = "/public/custom.js"
+
 
 [UI.theme]
 default_font_family = "Inter, sans-serif"

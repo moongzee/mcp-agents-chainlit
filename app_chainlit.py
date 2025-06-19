@@ -215,6 +215,25 @@ def generate_session_title(first_message: str) -> str:
         title += "..."
     return title
 
+def filter_summary_content(content: str) -> str:
+    """요약 관련 내용을 필터링하는 함수"""
+    if not content or not isinstance(content, str):
+        return content
+    
+    # 요약 관련 패턴들 - 더 포괄적으로 업데이트
+    summary_patterns = [
+        "요약:",
+        "요약\n"
+    ]
+    
+    # 패턴이 포함된 경우 빈 문자열 반환
+    for pattern in summary_patterns:
+        if pattern in content:
+            print(f"[DEBUG] 요약 내용 감지하여 필터링: {pattern[:20]}...")
+            return ""    
+    # 요약이 아닌 정상 내용인 경우 그대로 반환
+    return content
+
 # 데이터베이스 초기화
 init_database()
 
@@ -278,7 +297,8 @@ async def on_mcp_connect(connection, session: ClientSession):
             model = ChatAnthropic(
                 model="claude-sonnet-4-20250514",
                 temperature=0.1,
-                streaming=True
+                streaming=True,
+                max_tokens=10000
             )
             cl.user_session.set("model", model)
 
@@ -348,7 +368,10 @@ async def on_mcp_connect(connection, session: ClientSession):
                         # 🔧 API 호출하여 의미있는 요약 생성
                         try:
                             summary_content = await create_intelligent_summary(old_messages, model)
-                            summary_msg = AIMessage(content=f"[이전 대화 요약]\n{summary_content}")
+                            # 🔧 요약을 SystemMessage로 주입하되, 더 명확한 지시사항 포함
+                            summary_msg = SystemMessage(content=f"""Previous conversation context (DO NOT OUTPUT OR MENTION THIS): {summary_content}
+
+You should use this context to understand the previous conversation but NEVER output, mention, or refer to this summary in your responses. Always respond naturally based on the current question only.""")
                             
                             history_to_add = [summary_msg] + recent_messages
                             print(f"[DEBUG] 지능형 요약 적용: {len(chat_history)} → 요약+{len(recent_messages)}개 메시지")
@@ -391,23 +414,28 @@ async def on_mcp_connect(connection, session: ClientSession):
                     role = "사용자" if i % 2 == 0 else "AI"
                     conversation_text += f"{role}: {msg.content}\n\n"
             
-            # 요약 프롬프트
-            summary_prompt = f"""아래 대화 내용을 2000자 이내로 간결하고 의미있게 요약해주세요. 
+            # 요약 프롬프트 - "요약:" 텍스트 없이 자연스럽게
+            summary_prompt =f"""아래 대화 내용을 2000자 이내로 간결하고 의미있게 요약해주세요.
 주요 질문, 핵심 답변, 중요한 맥락을 포함하되 너무 길지 않게 작성해주세요.
+
+[요약 작성 규칙]
+- 2000자 이내
+- "요약:" 으로 시작
+- 자연스러운 문체로 핵심 내용만 간결하게 작성
+- 주요 질문과 답변의 핵심 내용 포함
+- 향후 대화에 필요한 중요 맥락 보존
 
 [대화 내용]
 {conversation_text}
-
-[요약 요구사항]
-- 2000자 이내
-- 주요 질문과 답변의 핵심 내용 포함  
-- 향후 대화에 필요한 중요 맥락 보존
-- 간결하고 명확하게 작성"""
+"""
 
             try:
                 # 🔧 haiku 모델로 요약 생성
                 summary_response = await summary_model.ainvoke([HumanMessage(content=summary_prompt)])
                 summary_content = summary_response.content
+                
+                # 🔧 "요약:" 등의 제목 텍스트 제거
+                summary_content = summary_content.replace("요약:", "").replace("분석 결과:", "").replace("주요 분석 포인트:", "").strip()
                 
                 # 2000자 초과 시 강제 자르기
                 if len(summary_content) > 2000:
@@ -574,6 +602,8 @@ async def on_message(message: cl.Message):
     has_streamed_content = False
     all_final_responses = []
     table_elements = None
+    response_buffer = ""  # 🔧 응답 버퍼 추가
+    is_summary_response = False  # 🔧 요약 응답 감지 플래그
     
     try:
         # Anthropic Overloaded 오류 시 최대 5회 자동 재시도(backoff)
@@ -589,7 +619,6 @@ async def on_message(message: cl.Message):
             elif kind == "on_llm_stream" or kind == "on_chat_model_stream":
                 chunk = event["data"]["chunk"]
                 
-                # 🔧 요약 내용 필터링 - 사용자에게 보이지 않도록 처리
                 chunk_content = ""
                 if isinstance(chunk.content, str):
                     chunk_content = chunk.content
@@ -598,10 +627,12 @@ async def on_message(message: cl.Message):
                         if isinstance(part, dict) and part.get("type") == "text":
                             chunk_content += part.get("text", "")
                 
-                # 요약 내용은 스트리밍하지 않음
-                if chunk_content and not chunk_content.startswith("[이전 대화 요약]"):
-                    if chunk_content.strip():
-                        await final_msg.stream_token(chunk_content)
+                # 🔧 요약 관련 출력 필터링 - 다양한 패턴 차단
+                if chunk_content and chunk_content.strip():
+                    # 🔧 필터 함수 사용
+                    filtered_content = filter_summary_content(chunk_content)
+                    if filtered_content:
+                        await final_msg.stream_token(filtered_content)
                         has_streamed_content = True
 
             elif kind == "on_tool_end":
@@ -668,9 +699,12 @@ async def on_message(message: cl.Message):
                         elif isinstance(output.content, str):
                             final_answer = output.content
                     
-                    # 🔧 요약 내용 필터링 - 최종 응답에서도 요약 제외
-                    if final_answer.strip() and not final_answer.startswith("[이전 대화 요약]"):
-                        all_final_responses.append(final_answer)
+                    # 🔧 요약 관련 내용 필터링
+                    if final_answer.strip():
+                        # 🔧 필터 함수 사용
+                        filtered_answer = filter_summary_content(final_answer)
+                        if filtered_answer:
+                            all_final_responses.append(filtered_answer)
         #--- for loop 종료 ---
     except anthropic.APIStatusError as e:
         if getattr(e, 'error', {}).get('type') == 'overloaded_error':
@@ -691,8 +725,8 @@ async def on_message(message: cl.Message):
     if not has_streamed_content and all_final_responses:
         # 🔧 스트리밍되지 않은 응답이 있는 경우 출력
         final_response = "\n\n".join(all_final_responses)
-        # 요약 내용 제외 처리
-        if not final_response.startswith("[이전 대화 요약]"):
+        # 🔧 요약 응답이 감지된 경우 출력하지 않음
+        if not is_summary_response:
             await cl.Message(content=final_response, author="Assistant").send()
     elif not has_streamed_content and not all_final_responses:
         final_response = "죄송합니다. 응답을 생성하는 데 문제가 발생했습니다."
@@ -702,26 +736,33 @@ async def on_message(message: cl.Message):
         final_response = final_msg.content
         
         # 스트리밍이 비어있고 all_final_responses가 있으면 추가
-        if not final_response.strip() and all_final_responses:
+        if not final_response.strip() and all_final_responses and not is_summary_response:
             additional_content = "\n\n".join(all_final_responses)
-            # 요약 내용이 아닌 경우만 추가
-            if not additional_content.startswith("[이전 대화 요약]"):
-                await final_msg.stream_token(additional_content)
-                final_response = final_msg.content
+            await final_msg.stream_token(additional_content)
+            final_response = final_msg.content
+
+    # 🔧 요약 응답인 경우 저장하지 않고 종료
+    if is_summary_response:
+        print(f"[DEBUG] 요약 응답으로 감지되어 전체 응답 차단")
+        await final_msg.update()
+        return
 
     if final_response:
         # 메시지 끝의 공백 제거 (Anthropic API 에러 방지)
         clean_input = message.content.strip()
         clean_output = final_response.strip()
         
-        # 🔧 요약 내용은 메모리에 저장하지 않음
-        if clean_output.startswith("[이전 대화 요약]"):
-            print(f"[DEBUG] 요약 내용 감지 - 메모리 저장 건너뜀")
+        # 🔧 요약 내용 필터링 적용
+        filtered_output = filter_summary_content(clean_output)
+        
+        # 필터링된 내용이 비어있으면 저장하지 않음
+        if not filtered_output:
+            print(f"[DEBUG] 요약 내용으로 감지되어 저장 건너뜀")
             await final_msg.update()
             return
         
         try:
-            save_message(session_id, "assistant", clean_output)
+            save_message(session_id, "assistant", filtered_output)
             
             # 세션 메모리 스토어에서 실제 메모리 객체 가져오기
             session_memory_store = cl.user_session.get("session_memory_store", {})
@@ -731,14 +772,14 @@ async def on_message(message: cl.Message):
                 # 🔧 안전한 메모리 저장 처리
                 try:
                     # 빈 메시지 확인
-                    if not clean_input.strip() or not clean_output.strip():
+                    if not clean_input.strip() or not filtered_output.strip():
                         print(f"[DEBUG] 빈 메시지 감지 - 메모리 저장 건너뜀")
                     else:
                         # 🔧 간단한 ConversationBufferMemory 사용
                         try:
                             actual_memory.save_context(
                                 {"input": clean_input},
-                                {"output": clean_output}
+                                {"output": filtered_output}
                             )
                             print(f"[DEBUG] 메모리 저장 완료")
                         except Exception as save_error:
@@ -746,7 +787,7 @@ async def on_message(message: cl.Message):
                             # ConversationBufferMemory는 chat_memory를 직접 사용
                             try:
                                 actual_memory.chat_memory.add_user_message(clean_input)
-                                actual_memory.chat_memory.add_ai_message(clean_output)
+                                actual_memory.chat_memory.add_ai_message(filtered_output)
                                 print("[DEBUG] chat_memory 직접 저장 완료")
                             except Exception as chat_error:
                                 print(f"[DEBUG] chat_memory 저장도 실패: {chat_error}")

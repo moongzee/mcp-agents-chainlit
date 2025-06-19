@@ -128,7 +128,15 @@ async def run_cortex_agents(query: str) -> Dict[str, Any]:
     
     payload = {
         "model": "claude-4-sonnet",
-        "response_instruction": "You are a helpful AI assistant.",
+        "response_instruction": (
+            "You are a helpful data analytics agent. "
+            "1. Always use the Analyst1 tool to convert user questions into SQL, referencing the provided semantic model. "
+            "2. Use the Search1 tool only if you need supporting documentation or additional context related to the query, or if the user explicitly asks for source documents. "
+            "3. Do not use Search1 unnecessarily if the Analyst1 output alone answers the question. "
+            "4. Combine the SQL execution results and, if used, the Search1 results into a concise, structured answer. "
+            "5. For SQL generation, ensure queries are safe and match the schema in the semantic model file. "
+            "6. Respond in a structured format: natural language answer first, then SQL, then citations."
+        ),
         "experimental": {},
         "tools": [
             {"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}},
@@ -139,7 +147,7 @@ async def run_cortex_agents(query: str) -> Dict[str, Any]:
             "Analyst1": {"semantic_model_file": SEMANTIC_MODEL_FILE},
             "Search1": {
                 "name": CORTEX_SEARCH_SERVICE,
-                "max_results": 10,
+                "max_results": 2,
                 "title_column": "relative_path",
                 "id_column": "doc_id",
                 "filter": {"@eq": {"language": "Korean"}}
