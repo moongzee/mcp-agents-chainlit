@@ -25,7 +25,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.runnables import RunnableConfig
 from langchain_core.callbacks import BaseCallbackHandler
-from modules.utils import trimming_node
 # Custom chain: summarization_node → agent_core
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 #from moduels.handlers import KoreanLangGraphCallbackHandler()
@@ -787,5 +786,3 @@ class AsyncConversationBufferMemory:
 
     def __getattr__(self, name):
         return getattr(self.memory, name)
-
-

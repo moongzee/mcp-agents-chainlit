@@ -32,3 +32,4 @@ tenacity==8.2.3
 python-dotenv==1.1.0
 requests==2.32.4
 tqdm==4.67.1
+flask

@@ -25,10 +25,10 @@ load_dotenv(find_dotenv())
 mcp = FastMCP("cortex_agent")
 
 # Constants
-SEMANTIC_MODEL_FILE = os.getenv("SEMANTIC_MODEL_FILE")
-CORTEX_SEARCH_SERVICE = os.getenv("CORTEX_SEARCH_SERVICE")
-SNOWFLAKE_ACCOUNT_URL = os.getenv("SNOWFLAKE_ACCOUNT_URL")
-SNOWFLAKE_PAT = os.getenv("SNOWFLAKE_PAT")
+SEMANTIC_MODEL_FILE = os.getenv("SEMANTIC_MODEL_FILE", default="@CORTEX_ANALYST_DEMO.LLM_POC.CORTEX_STAGE/fashion_streamlit.yaml")
+CORTEX_SEARCH_SERVICE = os.getenv("CORTEX_SEARCH_SERVICE", default="CORTEX_ANALYST_DEMO.LLM_POC.DOCS_MEETING")
+SNOWFLAKE_ACCOUNT_URL = os.getenv("SNOWFLAKE_ACCOUNT_URL", default="https://a1041574869271-eland-partner.snowflakecomputing.com")
+SNOWFLAKE_PAT = os.getenv("SNOWFLAKE_PAT", default="yJraWQiOiIyMTA0NTc2OTI3OTg5ODIiLCJhbGciOiJFUzI1NiJ9.eyJwIjoiMTI1NDQyNjA6MzIxMTMzMDA1MyIsImlzcyI6IlNGOjEwMzIiLCJleHAiOjE3ODE4MzA2NDZ9.zIsLtQrtoIp_WYZJyv_bU6U_KQ8Vr0T8MICvAjpgOb0wilLCwPcSAvH4wKzE4OGg8lFdEN7tR1X7KmfE56XxKg")
 
 if not SNOWFLAKE_PAT:
     raise RuntimeError("Set SNOWFLAKE_PAT environment variable")
@@ -127,7 +127,7 @@ async def run_cortex_agents(query: str) -> Dict[str, Any]:
     """
     
     payload = {
-        "model": "claude-3-5-sonnet",
+        "model": "claude-4-sonnet",
         "response_instruction": "You are a helpful AI assistant.",
         "experimental": {},
         "tools": [
@@ -180,5 +180,13 @@ async def run_cortex_agents(query: str) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")  # Claude는 stdio 기반 JSON-RPC 만 허용함
+    try:
+        logging.info("Cortex Agent MCP 서버 시작...")
+        mcp.run(transport="stdio")  # Claude는 stdio 기반 JSON-RPC 만 허용함
+    except KeyboardInterrupt:
+        logging.info("Cortex Agent MCP 서버가 사용자에 의해 중단되었습니다.")
+    except Exception as e:
+        logging.error(f"Cortex Agent MCP 서버 실행 중 오류 발생: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 

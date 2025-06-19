@@ -2,14 +2,14 @@
     "korea-weather": {
       "command": "python",
       "args": [
-        "./korea_weather.py"
+        "korea_weather.py"
       ],
       "transport": "stdio"
     },
     "snowflake-cortex": {
       "command": "python",
       "args": [
-        "./cortex_agents.py"
+        "cortex_agents.py"
       ],
       "transport": "stdio"
     }

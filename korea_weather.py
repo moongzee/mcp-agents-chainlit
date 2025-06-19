@@ -8,6 +8,7 @@ import asyncio
 from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
 import os
+import sys
 
 # Initialize FastMCP server
 mcp = FastMCP("korea_weather")
@@ -621,4 +622,13 @@ async def get_nowcast_forecast(lon: float, lat: float) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    try:
+        print("Korea Weather MCP 서버 시작...", file=sys.stderr)
+        mcp.run(transport="stdio")
+    except KeyboardInterrupt:
+        print("Korea Weather MCP 서버가 사용자에 의해 중단되었습니다.", file=sys.stderr)
+    except Exception as e:
+        print(f"Korea Weather MCP 서버 실행 중 오류 발생: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
