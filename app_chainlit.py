@@ -1,4 +1,4 @@
-# app_chainlit.py (도구 호출 및 최종 응답 오류 최종 해결 버전)
+# app_chainlit.py (메모리 관리 로직 및 함수 시그니처 수정 완료 버전)
 
 # --- 1. 기본 라이브러리 임포트 ---
 import chainlit as cl
@@ -30,6 +30,13 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 #from moduels.handlers import KoreanLangGraphCallbackHandler()
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 import anthropic
+import asyncio
+
+# 네트워크 관련
+import httpx
+from httpx import ReadError as HttpxReadError
+import httpcore
+from httpcore import ReadError as HttpcoreReadError
 
 
 # --- 3. MCP 타입 임포트 추가 ---
@@ -48,6 +55,9 @@ except FileNotFoundError:
 
 # 채팅 기록 저장을 위한 SQLite 데이터베이스 초기화
 DB_PATH = "chat_history.db"
+
+# 🔧 전역 세션 메모리 스토어 추가
+session_memory_store = {}
 
 def init_database():
     """채팅 기록 저장용 데이터베이스 초기화"""
@@ -215,24 +225,192 @@ def generate_session_title(first_message: str) -> str:
         title += "..."
     return title
 
-def filter_summary_content(content: str) -> str:
-    """요약 관련 내용을 필터링하는 함수"""
-    if not content or not isinstance(content, str):
-        return content
+# 🔧 에러 발생 시 대화 초기화 안내를 위한 유틸리티 함수들
+async def send_error_with_reset_guidance(error_message: str, error_type: str = "일반"):
+    """에러 메시지와 함께 대화 초기화 안내를 보내는 함수"""
     
-    # 요약 관련 패턴들 - 더 포괄적으로 업데이트
-    summary_patterns = [
-        "요약:",
-        "요약\n"
-    ]
+    # 🎨 에러 타입별 맞춤 메시지
+    if error_type == "네트워크":
+        reset_guidance = """
+🔄 **해결 방법:**
+1. **새로운 대화 시작**: 브라우저를 새로고침하거나 새 탭에서 대화를 시작해보세요
+2. **잠시 후 재시도**: 네트워크가 안정된 후 다시 시도해주세요
+3. **짧은 메시지로 시도**: 긴 질문 대신 짧은 메시지로 시작해보세요
+
+💡 **팁**: 새로고침 후에도 같은 문제가 반복되면, 몇 분 후에 다시 접속해보세요.
+"""
+    elif error_type == "API":
+        reset_guidance = """
+🔄 **해결 방법:**
+1. **새로운 대화 시작**: 페이지를 새로고침하여 새로운 대화를 시작해주세요
+2. **잠시 대기**: API 서버가 안정화될 때까지 5-10분 정도 기다려주세요
+3. **간단한 질문부터**: 복잡한 작업보다는 간단한 질문부터 시작해보세요
+
+💡 **팁**: 서버 과부하가 해소되면 정상적으로 이용하실 수 있습니다.
+"""
+    elif error_type == "메모리":
+        reset_guidance = """
+🔄 **해결 방법:**
+1. **즉시 새로고침**: 브라우저를 새로고침하여 메모리를 초기화해주세요
+2. **대화 기록 정리**: 너무 긴 대화는 새로운 세션에서 시작하는 것이 좋습니다
+3. **단계별 질문**: 복합적인 질문보다는 단계별로 나누어 질문해주세요
+
+💡 **팁**: 새 대화에서는 이전 내용을 간단히 요약해서 다시 질문해주세요.
+"""
+    else:  # 일반 에러
+        reset_guidance = """
+🔄 **해결 방법:**
+1. **페이지 새로고침**: F5키나 브라우저 새로고침 버튼을 눌러주세요
+2. **새 탭에서 시작**: 새로운 브라우저 탭에서 대화를 시작해보세요
+3. **잠시 후 재시도**: 몇 분 후에 다시 시도해보세요
+
+💡 **지속적인 문제**: 계속 같은 오류가 발생하면 브라우저 캐시를 삭제해보세요.
+"""
     
-    # 패턴이 포함된 경우 빈 문자열 반환
-    for pattern in summary_patterns:
-        if pattern in content:
-            print(f"[DEBUG] 요약 내용 감지하여 필터링: {pattern[:20]}...")
-            return ""    
-    # 요약이 아닌 정상 내용인 경우 그대로 반환
-    return content
+    # 🚨 에러 메시지 + 안내사항 결합
+    full_message = f"""⚠️ **오류 발생**: {error_message}
+
+{reset_guidance}
+
+🔧 **빠른 해결**: 지금 바로 **Ctrl+F5** (Windows) 또는 **Cmd+R** (Mac)을 눌러 새로고침해보세요!
+"""
+    
+    await cl.Message(content=full_message).send()
+
+async def send_critical_error_guidance():
+    """심각한 에러 발생 시 상세한 안내를 보내는 함수"""
+    
+    critical_guidance = """
+🚨 **시스템 오류가 발생했습니다**
+
+이 문제를 해결하기 위해 다음 단계를 따라해주세요:
+
+### 🔄 **즉시 해결 방법**
+1. **브라우저 새로고침**: `F5` 또는 `Ctrl+F5`를 눌러주세요
+2. **새 탭 열기**: 새로운 브라우저 탭에서 다시 접속해주세요
+3. **5분 대기**: 시스템이 안정화될 때까지 잠시 기다려주세요
+
+### 🛠️ **추가 해결 방법**
+- **브라우저 캐시 삭제**: 설정 > 개인정보 > 인터넷 사용 기록 삭제
+- **다른 브라우저 사용**: Chrome, Firefox, Safari 등 다른 브라우저 시도
+- **인터넷 연결 확인**: Wi-Fi 또는 네트워크 연결 상태 점검
+
+### 💬 **새 대화 시작하기**
+문제가 해결되면 간단한 인사말("안녕하세요")로 새 대화를 시작해보세요!
+
+---
+*문제가 계속 발생하면 잠시 후 다시 시도해주세요. 시스템이 자동으로 복구됩니다.*
+"""
+    
+    await cl.Message(content=critical_guidance).send()
+
+
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    stop=stop_after_attempt(3),
+    retry=retry_if_exception_type((HttpxReadError, HttpcoreReadError, ConnectionError))
+)
+async def create_intelligent_summary_silent(messages_to_summarize, existing_summary=None):
+    """API를 호출하여 의미있는 요약 생성"""
+    summary_model = ChatAnthropic(
+        model="claude-3-haiku-20240307",
+        temperature=0.1,
+        streaming=False,
+        timeout=60.0,
+        max_retries=2
+    )
+
+    conversation_text = "\n\n".join(
+        f"{'사용자' if isinstance(msg, HumanMessage) else 'AI'}: {msg.content}"
+        for msg in messages_to_summarize
+    )
+
+    if existing_summary:
+        summary_prompt = f"""다음은 지금까지의 대화 요약과 새로 추가된 대화 내용입니다. 기존 요약을 바탕으로 새로운 대화 내용을 자연스럽게 통합하여 업데이트된 전체 요약본을 만들어주세요.
+
+[기존 요약]
+{existing_summary}
+
+[새로운 대화 내용]
+{conversation_text}
+
+[업데이트된 전체 요약]:"""
+    else:
+        summary_prompt = f"""다음 대화 내용을 한국어로 간결하게 핵심만 요약해주세요. 이 요약은 대화의 맥락을 유지하기 위한 내부 정보로 사용됩니다.
+
+[대화 내용]
+{conversation_text}
+
+[요약]:"""
+
+    try:
+        summary_response = await summary_model.ainvoke([HumanMessage(content=summary_prompt)])
+        summary_content = summary_response.content.strip()
+        print(f"[DEBUG] 요약 생성/업데이트 완료.")
+        return summary_content
+    except Exception as e:
+        print(f"[DEBUG] 요약 API 호출 실패: {e}")
+        return existing_summary or f"이전 대화 {len(messages_to_summarize)}개 (요약 생성 중 오류 발생)"
+
+async def preprocess_with_silent_summary(input_data):
+    """누적 요약 기능이 포함된 전처리기"""
+    global session_memory_store
+    session_id = cl.context.session.id
+
+    if session_id not in session_memory_store:
+        session_memory_store[session_id] = ConversationBufferMemory(
+            return_messages=True, memory_key="chat_history"
+        )
+    memory = session_memory_store[session_id]
+
+    user_message = input_data.get("messages", [])
+    system_prompt_message = [SystemMessage(content=SYSTEM_PROMPT)]
+
+    try:
+        memory_vars = memory.load_memory_variables({})
+        chat_history = memory_vars.get("chat_history", [])
+
+        existing_summary = None
+        # 대화 기록의 첫 번째가 시스템 메시지이고, 요약본이라면 추출
+        if chat_history and isinstance(chat_history[0], SystemMessage):
+            # content가 문자열인지 확인
+            if isinstance(chat_history[0].content, str) and chat_history[0].content.startswith("--- 누적 요약 ---"):
+                existing_summary = chat_history[0].content
+                chat_history = chat_history[1:]  # 실제 대화만 남김
+                print(f"[DEBUG] 기존 요약 발견. 실제 대화 길이: {len(chat_history)}")
+
+        # 실제 대화 기록이 4개 이상일 때만 요약 로직 실행
+        if len(chat_history) >= 4:
+            messages_to_summarize = chat_history[:-2]
+            recent_messages = chat_history[-2:]
+
+            print(f"[DEBUG] 누적 요약 시작. 기존 요약:{'있음' if existing_summary else '없음'}, 요약 대상:{len(messages_to_summarize)}, 유지:{len(recent_messages)}")
+            
+            # 기존 요약과 함께 새로운 요약 생성
+            updated_summary_content = await create_intelligent_summary_silent(messages_to_summarize, existing_summary)
+            
+            # 새로운 요약 메시지와 최신 대화로 메모리를 완전히 재구성
+            summary_message = SystemMessage(content=f"--- 누적 요약 ---\n{updated_summary_content}")
+            memory.chat_memory.messages = [summary_message] + recent_messages
+            
+            print(f"[DEBUG] 메모리 재구성 완료. 현재 메모리: 요약 1개 + 최신 대화 {len(recent_messages)}개")
+            
+            # LLM에는 현재 턴의 요약본과 최신 대화를 전달
+            messages_for_llm = [summary_message] + recent_messages
+
+        else:
+            # 요약할 만큼 길지 않으면, 기존 요약(있다면)과 전체 기록을 그대로 사용
+            messages_for_llm = ([SystemMessage(content=existing_summary)] if existing_summary else []) + chat_history
+
+        final_messages_to_agent = system_prompt_message + messages_for_llm + user_message
+        
+        print(f"[DEBUG] 최종 전달 메시지 수: {len(final_messages_to_agent)}")
+        return {"messages": final_messages_to_agent}
+
+    except Exception as e:
+        print(f"[DEBUG] 전처리 중 심각한 오류 발생: {e}")
+        traceback.print_exc()
+        return {"messages": system_prompt_message + user_message}
 
 # 데이터베이스 초기화
 init_database()
@@ -278,10 +456,25 @@ def auth_callback(username: str, password: str) -> Optional[cl.User]:
         print(f"DEBUG: 로그인 실패 - 사용자명 또는 비밀번호 불일치")
         return None
 
-# --- 6. MCP 연결 핸들러 정의 ---
 
+def create_robust_anthropic_model():
+    """네트워크 안정성을 위한 강화된 Anthropic 모델 생성"""
+    
+    model = ChatAnthropic(
+        model="claude-sonnet-4-20250514",
+        temperature=0.1,
+        streaming=True,
+        max_tokens=16000,
+        max_retries=3,  # API 레벨 재시도
+        timeout=180.0,  # 전체 요청 타임아웃 3분
+    )
+    return model
+
+
+# --- 6. MCP 연결 핸들러 정의 ---
 @cl.on_mcp_connect
 async def on_mcp_connect(connection, session: ClientSession):
+    global session_memory_store  # 전역 변수 사용
     
     try:
         tool_metadatas = await session.list_tools()
@@ -294,12 +487,7 @@ async def on_mcp_connect(connection, session: ClientSession):
         
         model = cl.user_session.get("model")
         if not model:
-            model = ChatAnthropic(
-                model="claude-sonnet-4-20250514",
-                temperature=0.1,
-                streaming=True,
-                max_tokens=10000
-            )
+            model = create_robust_anthropic_model()
             cl.user_session.set("model", model)
 
         from langchain_core.tools import Tool
@@ -327,129 +515,6 @@ async def on_mcp_connect(connection, session: ClientSession):
                     )
                 )
 
-        
-        # 세션별 메모리를 담아둘 저장소 (in-memory dict)
-        session_memory_store = {}
-        
-        # 🔧 맥락 유지형 요약 노드 - 안전한 수동 요약 방식
-        async def summary_node(state):
-            """맥락을 유지하면서 메시지를 제한하는 노드"""
-            messages = state.get("messages", [])
-            session_id = cl.context.session.id
-            
-            # 세션 메모리 가져오기
-            if session_id not in session_memory_store:
-                new_memory = ConversationBufferMemory(
-                    return_messages=True,
-                    memory_key="chat_history"
-                )
-                session_memory_store[session_id] = new_memory
-            
-            memory = session_memory_store[session_id]
-            
-            # 시스템 메시지와 일반 메시지 분리
-            system_messages = [msg for msg in messages if isinstance(msg, SystemMessage)]
-            non_system_messages = [msg for msg in messages if not isinstance(msg, SystemMessage)]
-            
-            try:
-                memory_vars = memory.load_memory_variables({})
-                chat_history = memory_vars.get("chat_history", [])
-                
-                # 메시지 처리
-                history_to_add = []
-                
-                if isinstance(chat_history, list) and chat_history:
-                    # 대화가 길어지면 수동 요약 수행
-                    if len(chat_history) > 6:  # 3번의 대화 (6개 메시지) 이상 시
-                        # 앞의 4개 메시지를 요약으로 변환
-                        old_messages = chat_history[:4]
-                        recent_messages = chat_history[4:]
-                        
-                        # 🔧 API 호출하여 의미있는 요약 생성
-                        try:
-                            summary_content = await create_intelligent_summary(old_messages, model)
-                            # 🔧 요약을 SystemMessage로 주입하되, 더 명확한 지시사항 포함
-                            summary_msg = SystemMessage(content=f"""Previous conversation context (DO NOT OUTPUT OR MENTION THIS): {summary_content}
-
-You should use this context to understand the previous conversation but NEVER output, mention, or refer to this summary in your responses. Always respond naturally based on the current question only.""")
-                            
-                            history_to_add = [summary_msg] + recent_messages
-                            print(f"[DEBUG] 지능형 요약 적용: {len(chat_history)} → 요약+{len(recent_messages)}개 메시지")
-                        except Exception as summary_error:
-                            print(f"[DEBUG] 요약 생성 실패: {summary_error}")
-                            # 요약 실패 시 최근 4개 메시지만 유지
-                            history_to_add = chat_history[-4:] if len(chat_history) > 4 else chat_history
-                            print(f"[DEBUG] 요약 실패로 최근 메시지만 유지: {len(history_to_add)}개")
-                    else:
-                        # 아직 길지 않으면 전체 유지
-                        history_to_add = chat_history
-                
-                # 최종 메시지 구성: [시스템] + [요약+최근히스토리] + [현재새메시지]
-                combined_messages = system_messages + history_to_add + non_system_messages
-                
-                print(f"[DEBUG] summary_node: 시스템={len(system_messages)}, 히스토리={len(history_to_add)}, 새메시지={len(non_system_messages)}, 총={len(combined_messages)}")
-                
-                return {"messages": combined_messages}
-                
-            except Exception as e:
-                print(f"[DEBUG] summary_node 오류: {e}")
-                # 오류 시 새 메시지만 반환 (히스토리 없이)
-                return {"messages": system_messages + non_system_messages}
-        
-        # 🔧 지능형 요약 생성 함수
-        async def create_intelligent_summary(messages, model):
-            """API를 호출하여 2000자 이내의 의미있는 요약 생성"""
-            
-            # 🔧 요약 전용 모델 생성 (경제적이고 빠른 haiku 모델 사용)
-            summary_model = ChatAnthropic(
-                model="claude-3-haiku-20240307",
-                temperature=0.1,
-                streaming=False  # 요약은 스트리밍 불필요
-            )
-            
-            # 메시지들을 텍스트로 변환
-            conversation_text = ""
-            for i, msg in enumerate(messages):
-                if hasattr(msg, 'content'):
-                    role = "사용자" if i % 2 == 0 else "AI"
-                    conversation_text += f"{role}: {msg.content}\n\n"
-            
-            # 요약 프롬프트 - "요약:" 텍스트 없이 자연스럽게
-            summary_prompt =f"""아래 대화 내용을 2000자 이내로 간결하고 의미있게 요약해주세요.
-주요 질문, 핵심 답변, 중요한 맥락을 포함하되 너무 길지 않게 작성해주세요.
-
-[요약 작성 규칙]
-- 2000자 이내
-- "요약:" 으로 시작
-- 자연스러운 문체로 핵심 내용만 간결하게 작성
-- 주요 질문과 답변의 핵심 내용 포함
-- 향후 대화에 필요한 중요 맥락 보존
-
-[대화 내용]
-{conversation_text}
-"""
-
-            try:
-                # 🔧 haiku 모델로 요약 생성
-                summary_response = await summary_model.ainvoke([HumanMessage(content=summary_prompt)])
-                summary_content = summary_response.content
-                
-                # 🔧 "요약:" 등의 제목 텍스트 제거
-                summary_content = summary_content.replace("요약:", "").replace("분석 결과:", "").replace("주요 분석 포인트:", "").strip()
-                
-                # 2000자 초과 시 강제 자르기
-                if len(summary_content) > 2000:
-                    summary_content = summary_content[:1950] + "..."
-                
-                print(f"[DEBUG] 요약 생성 완료 (haiku): {len(conversation_text)}자 → {len(summary_content)}자")
-                return summary_content
-                
-            except Exception as e:
-                print(f"[DEBUG] 요약 API 호출 실패: {e}")
-                # 실패 시 간단한 수동 요약으로 폴백
-                fallback_summary = f"이전 대화 {len(messages)}개 메시지 (API 요약 실패로 생략)"
-                return fallback_summary
-        
         # 메모리 객체 생성 및 저장
         def get_session_history(session_id: str):
             if session_id not in session_memory_store:
@@ -464,35 +529,35 @@ You should use this context to understand the previous conversation but NEVER ou
         cl.user_session.set("memory", memory)
         cl.user_session.set("session_memory_store", session_memory_store)
 
-        # 🔧 Agent core 생성 - checkpointer=None으로 설정하여 자체 메모리 관리 비활성화
+        # 🔧 순수 Agent core만 생성 (요약은 전처리에서 처리)
         agent_core = create_react_agent(
             model,
             all_langchain_tools,
-            checkpointer=None,  # 자체 메모리 관리 비활성화
+            checkpointer=None,
             prompt=SYSTEM_PROMPT,
         )
 
-        # 🔧 맥락 유지형 에이전트: summary_node → agent_core
-        context_preserving_agent = (
-            RunnableLambda(summary_node) |  # 맥락 유지 요약 (async 지원)
-            agent_core  # ReAct 반복 수행
-        )
-
-        # 세션에 agent 저장
-        cl.user_session.set("agent", context_preserving_agent)
+        # 🔧 순수 agent 저장 (RunnableLambda 체인 없음)
+        cl.user_session.set("agent", agent_core)
+        
+        print("[DEBUG] MCP 연결 완료 - 순수 agent 설정됨")
 
     except Exception as e:
-        error_msg = f"MCP 연결 처리 중 오류 발생: {e}"
+        error_msg = f"MCP 연결 처리 중 오류가 발생했습니다: {e}"
         print(error_msg)
         traceback.print_exc()
-        await cl.Message(content=error_msg).send()
+        
+        # MCP 연결 실패 시 안내
+        await send_error_with_reset_guidance(
+            "도구 연결에 실패했습니다. 일부 기능이 제한될 수 있습니다.", 
+            "일반"
+        )
 
 @cl.on_mcp_disconnect
 async def on_mcp_disconnect(connection):
     await cl.Message(content=f"MCP 연결 '{connection.name}'이(가) 종료되었습니다.").send()
 
 # --- 7. Chainlit 메시지 핸들러 ---
-
 @cl.on_settings_update
 async def setup_agent(settings):
     """설정 업데이트 시 에이전트 재설정"""
@@ -527,21 +592,33 @@ async def on_chat_start():
     
     await cl.Message(content=f"안녕하세요 {display_name}님! NOA 입니다. 무엇이든 물어보세요 😊").send()
 
-
-
 @retry(
     wait=wait_exponential(multiplier=1, min=2, max=10),
     stop=stop_after_attempt(5),
-    retry=retry_if_exception_type(anthropic.APIStatusError)
+    retry=retry_if_exception_type((
+        anthropic.APIStatusError,
+        HttpxReadError,  # httpx 읽기 에러
+        HttpcoreReadError,  # httpcore 읽기 에러
+        anthropic.APIConnectionError,  # API 연결 에러
+        anthropic.APITimeoutError,  # API 타임아웃
+        ConnectionError,  # 일반 연결 에러
+        TimeoutError  # 일반 타임아웃
+    ))
 )
-async def astream_events_with_retry(agent, message, config):
-    async for event in agent.astream_events(
-        {"messages": [message]},
-        config=config,
-        version="v2"
-    ):
-        yield event
-
+async def astream_events_with_retry(agent, messages, config):
+    """강화된 재시도 로직으로 스트림 이벤트 처리"""
+    try:
+        async for event in agent.astream_events(
+            {"messages": messages},
+            config=config,
+            version="v2"
+        ):
+            yield event
+    except (HttpxReadError, HttpcoreReadError) as e:
+        print(f"[DEBUG] 네트워크 읽기 에러 발생: {e}")
+        # 짧은 대기 후 재시도
+        await asyncio.sleep(1)
+        raise  # 재시도 데코레이터가 처리
 
 @cl.on_chat_end
 async def on_chat_end():
@@ -562,14 +639,18 @@ async def on_chat_end():
         actual_user_id = user.metadata.get("user_id", user.identifier)
         save_chat_session(session_id, actual_user_id, title)
 
-
 @cl.on_message
 async def on_message(message: cl.Message):
-    """사용자 메시지 처리"""
+    """사용자 메시지 처리 - 메모리 저장 순서 수정"""
+    global session_memory_store
+    
     # 현재 사용자 확인
     user = cl.user_session.get("user") or cl.context.session.user
     if not user:
-        await cl.Message(content="로그인이 필요합니다. 다시 로그인해주세요.").send()
+        await send_error_with_reset_guidance(
+            "로그인이 필요합니다. 다시 로그인해주세요.", 
+            "일반"
+        )
         return
     
     # 메시지 카운트 및 첫 메시지 저장
@@ -578,224 +659,274 @@ async def on_message(message: cl.Message):
     cl.user_session.set("message_count", message_count)
     
     if message_count == 1:
-        # 첫 번째 메시지 저장 (세션 제목용)
         cl.user_session.set("first_message", message.content)
     
     # 메시지 DB에 저장
     session_id = cl.context.session.id
-    save_message(session_id, "user", message.content)
+    try:
+        save_message(session_id, "user", message.content)
+    except Exception as db_error:
+        print(f"[DEBUG] DB 저장 실패: {db_error}")
     
     agent = cl.user_session.get("agent")
     if not agent:
-        await cl.Message(content="에이전트가 아직 설정되지 않았습니다. 먼저 MCP 서버에 연결해주세요.").send()
+        await send_error_with_reset_guidance(
+            "에이전트가 아직 설정되지 않았습니다. MCP 서버 연결을 확인해주세요.", 
+            "일반"
+        )
         return
 
-    # 🔧 기본 Chainlit 콜백 사용
+    # 🔧 1. 먼저 요약을 전처리에서 조용히 처리
+    input_data = {"messages": [HumanMessage(content=message.content)]}
+    processed_input = await preprocess_with_silent_summary(input_data)
+    
+    # 🔧 2. 처리된 메시지로 agent 실행
     config = RunnableConfig(
         recursion_limit=100,
         thread_id=cl.context.session.id,
         callbacks=[cl.LangchainCallbackHandler()],
     )
 
-    # 최종 응답 메시지 처리
     final_msg = cl.Message(content="", author="Assistant")
     has_streamed_content = False
     all_final_responses = []
     table_elements = None
-    response_buffer = ""  # 🔧 응답 버퍼 추가
-    is_summary_response = False  # 🔧 요약 응답 감지 플래그
     
-    try:
-        # Anthropic Overloaded 오류 시 최대 5회 자동 재시도(backoff)
-        async for event in astream_events_with_retry(
-            agent, HumanMessage(content=message.content), config
-        ):
-            kind = event["event"]
+    max_network_retries = 3
+    network_retry_count = 0
+    
+    while network_retry_count < max_network_retries:
+        try:
+            # 🔧 전처리된 메시지로 agent 실행 (전체 메시지 배열 전달)
+            async for event in astream_events_with_retry(
+                agent, processed_input["messages"], config
+            ):
+                kind = event["event"]
 
-            if kind == "on_llm_start":
-                if not final_msg.id:
-                    await final_msg.send()
+                if kind == "on_llm_start":
+                    if not final_msg.id:
+                        await final_msg.send()
 
-            elif kind == "on_llm_stream" or kind == "on_chat_model_stream":
-                chunk = event["data"]["chunk"]
-                
-                chunk_content = ""
-                if isinstance(chunk.content, str):
-                    chunk_content = chunk.content
-                elif isinstance(chunk.content, list):
-                    for part in chunk.content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            chunk_content += part.get("text", "")
-                
-                # 🔧 요약 관련 출력 필터링 - 다양한 패턴 차단
-                if chunk_content and chunk_content.strip():
-                    # 🔧 필터 함수 사용
-                    filtered_content = filter_summary_content(chunk_content)
-                    if filtered_content:
-                        await final_msg.stream_token(filtered_content)
+                elif kind == "on_llm_stream" or kind == "on_chat_model_stream":
+                    chunk = event["data"]["chunk"]
+                    
+                    chunk_content = ""
+                    if isinstance(chunk.content, str):
+                        chunk_content = chunk.content
+                    elif isinstance(chunk.content, list):
+                        for part in chunk.content:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                chunk_content += part.get("text", "")
+                    
+                    if chunk_content and chunk_content.strip():
+                        await final_msg.stream_token(chunk_content)
                         has_streamed_content = True
 
-            elif kind == "on_tool_end":
-                step = cl.user_session.get(f"tool_step_{event['run_id']}")
-                tool_output_object = event["data"].get("output")
-                json_string_to_parse = None
-                raw_content = None
-                if isinstance(tool_output_object, ToolMessage):
-                    raw_content = tool_output_object.content
-                if isinstance(raw_content, CallToolResult):
-                    for content_item in raw_content.content:
-                        if isinstance(content_item, TextContent):
-                            json_string_to_parse = content_item.text
-                            break
-                elif isinstance(raw_content, str):
-                    match = re.search(r"text='(.*?)', annotations=None", raw_content, re.DOTALL)
-                    if match:
-                        json_string_to_parse = match.group(1)
-                    else:
-                        print("정규표현식 매칭 실패! 파싱 시도하지 않음.")
-                        json_string_to_parse = None
+                elif kind == "on_tool_end":
+                    step = cl.user_session.get(f"tool_step_{event['run_id']}")
+                    tool_output_object = event["data"].get("output")
+                    json_string_to_parse = None
+                    raw_content = None
+                    if isinstance(tool_output_object, ToolMessage):
+                        raw_content = tool_output_object.content
+                    if isinstance(raw_content, CallToolResult):
+                        for content_item in raw_content.content:
+                            if isinstance(content_item, TextContent):
+                                json_string_to_parse = content_item.text
+                                break
+                    elif isinstance(raw_content, str):
+                        match = re.search(r"text='(.*?)', annotations=None", raw_content, re.DOTALL)
+                        if match:
+                            json_string_to_parse = match.group(1)
+                        else:
+                            print("정규표현식 매칭 실패! 파싱 시도하지 않음.")
+                            json_string_to_parse = None
 
-                if step:
-                    step.output = json_string_to_parse or str(raw_content)
+                    if step:
+                        step.output = json_string_to_parse or str(raw_content)
 
-                if event["name"] == "run_cortex_agents" and json_string_to_parse and json_string_to_parse.strip():
-                    try:
-                        unescaped = codecs.decode(json_string_to_parse, "unicode_escape")
-                        if isinstance(unescaped, str):
-                            unescaped = unescaped.encode("latin1").decode("utf-8")
-                        tool_result_json = json.loads(unescaped)
-                        chart_data = tool_result_json.get("results", {})
-                        elements = []
-                        if chart_data and chart_data.get("data"):
-                            columns = [col["name"] for col in chart_data["resultSetMetaData"]["rowType"]]
-                            df = pd.DataFrame(chart_data["data"], columns=columns)
-                            elements.append(cl.Dataframe(data=df, name="상세 데이터", display="inline"))
-                            string_io = io.StringIO()
-                            df.to_csv(string_io, index=False, encoding='utf-8-sig')
-                            csv_bytes = string_io.getvalue().encode('utf-8-sig')
-                            elements.append(cl.File(
-                                name=f"report_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                content=csv_bytes,
-                                display="inline"
-                            ))
-                        if elements and table_elements is None:
-                            table_elements = elements
-                    except Exception as e:
-                        print(f"'{event['name']}' 툴 결과 처리 중 오류 발생:")
-                        traceback.print_exc()
+                    if event["name"] == "run_cortex_agents" and json_string_to_parse and json_string_to_parse.strip():
+                        try:
+                            unescaped = codecs.decode(json_string_to_parse, "unicode_escape")
+                            if isinstance(unescaped, str):
+                                unescaped = unescaped.encode("latin1").decode("utf-8")
+                            tool_result_json = json.loads(unescaped)
+                            chart_data = tool_result_json.get("results", {})
+                            elements = []
+                            if chart_data and chart_data.get("data"):
+                                columns = [col["name"] for col in chart_data["resultSetMetaData"]["rowType"]]
+                                df = pd.DataFrame(chart_data["data"], columns=columns)
+                                elements.append(cl.Dataframe(data=df, name="상세 데이터", display="inline"))
+                                string_io = io.StringIO()
+                                df.to_csv(string_io, index=False, encoding='utf-8-sig')
+                                csv_bytes = string_io.getvalue().encode('utf-8-sig')
+                                elements.append(cl.File(
+                                    name=f"report_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                    content=csv_bytes,
+                                    display="inline"
+                                ))
+                            if elements and table_elements is None:
+                                table_elements = elements
+                        except Exception as e:
+                            print(f"'{event['name']}' 툴 결과 처리 중 오류 발생:")
+                            traceback.print_exc()
 
-                if step:
-                    await step.update()
+                    if step:
+                        await step.update()
 
-            elif kind == "on_llm_end" or kind == "on_chat_model_end":
-                output = event["data"].get("output")
-                if output:
-                    final_answer = ""
-                    if hasattr(output, 'content'):
-                        if isinstance(output.content, list):
-                            for part in output.content:
-                                if isinstance(part, dict) and part.get("type") == "text":
-                                    final_answer += part.get("text", "")
-                        elif isinstance(output.content, str):
-                            final_answer = output.content
-                    
-                    # 🔧 요약 관련 내용 필터링
-                    if final_answer.strip():
-                        # 🔧 필터 함수 사용
-                        filtered_answer = filter_summary_content(final_answer)
-                        if filtered_answer:
-                            all_final_responses.append(filtered_answer)
-        #--- for loop 종료 ---
-    except anthropic.APIStatusError as e:
-        if getattr(e, 'error', {}).get('type') == 'overloaded_error':
-            await cl.Message(content="Anthropic 서버 과부하로 일시적으로 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요.").send()
+                elif kind == "on_llm_end" or kind == "on_chat_model_end":
+                    output = event["data"].get("output")
+                    if output:
+                        final_answer = ""
+                        if hasattr(output, 'content'):
+                            if isinstance(output.content, list):
+                                for part in output.content:
+                                    if isinstance(part, dict) and part.get("type") == "text":
+                                        final_answer += part.get("text", "")
+                            elif isinstance(output.content, str):
+                                final_answer = output.content
+                        
+                        if final_answer.strip():
+                            all_final_responses.append(final_answer)
+            
+            # 성공하면 루프 종료
+            break
+            
+        except (HttpxReadError, HttpcoreReadError, ConnectionError) as network_error:
+            network_retry_count += 1
+            print(f"[DEBUG] 네트워크 에러 발생 ({network_retry_count}/{max_network_retries}): {network_error}")
+            
+            if network_retry_count < max_network_retries:
+                # 재시도 전 대기
+                wait_time = 2 ** network_retry_count  # 지수 백오프
+                await asyncio.sleep(wait_time)
+                
+                # 사용자에게 재시도 알림
+                await cl.Message(
+                    content=f"🔄 네트워크 연결이 불안정합니다. 재시도 중... ({network_retry_count}/{max_network_retries})"
+                ).send()
+                continue
+            else:
+                # 최대 재시도 횟수 초과 - 네트워크 에러 안내
+                await send_error_with_reset_guidance(
+                    "네트워크 연결이 불안정하여 응답을 완료할 수 없습니다.", 
+                    "네트워크"
+                )
+                return
+                
+        except anthropic.APIStatusError as e:
+            if getattr(e, 'error', {}).get('type') == 'overloaded_error':
+                await send_error_with_reset_guidance(
+                    "Anthropic 서버가 과부하 상태입니다.", 
+                    "API"
+                )
+                return
+            else:
+                await send_error_with_reset_guidance(
+                    f"API 오류가 발생했습니다: {str(e)}", 
+                    "API"
+                )
+                return
+                
+        except MemoryError as memory_error:
+            print(f"[DEBUG] 메모리 에러: {memory_error}")
+            await send_error_with_reset_guidance(
+                "메모리 부족으로 처리할 수 없습니다.", 
+                "메모리"
+            )
             return
-    except Exception as e:
-        await cl.Message(content=f"알수없는 오류가 발생했습니다: {str(e)}").send()
-        return
+            
+        except RecursionError as recursion_error:
+            print(f"[DEBUG] 재귀 에러: {recursion_error}")
+            await send_error_with_reset_guidance(
+                "처리 과정이 너무 복잡해졌습니다.", 
+                "메모리"
+            )
+            return
+            
+        except Exception as e:
+            print(f"[DEBUG] 예상치 못한 오류: {e}")
+            traceback.print_exc()
+            
+            # 🚨 알 수 없는 오류에 대한 상세 안내
+            await send_critical_error_guidance()
+            return
 
+    # 테이블 요소 처리
     if table_elements:
         await cl.Message(
-            content="DATA",
+            content="📊 **데이터 결과**",
             elements=table_elements,
         ).send()
         table_elements = None
 
+    # 🔧 3. 응답 완료 후 메모리에 대화 저장 (가장 중요!)
     final_response = ""
     if not has_streamed_content and all_final_responses:
-        # 🔧 스트리밍되지 않은 응답이 있는 경우 출력
         final_response = "\n\n".join(all_final_responses)
-        # 🔧 요약 응답이 감지된 경우 출력하지 않음
-        if not is_summary_response:
-            await cl.Message(content=final_response, author="Assistant").send()
-    elif not has_streamed_content and not all_final_responses:
-        final_response = "죄송합니다. 응답을 생성하는 데 문제가 발생했습니다."
         await cl.Message(content=final_response, author="Assistant").send()
+    elif not has_streamed_content and not all_final_responses:
+        await send_error_with_reset_guidance(
+            "응답을 생성하는 데 문제가 발생했습니다.", 
+            "일반"
+        )
+        return
     else:
-        # 🔧 스트리밍된 경우 final_msg 내용 확인 및 완료 처리
         final_response = final_msg.content
         
-        # 스트리밍이 비어있고 all_final_responses가 있으면 추가
-        if not final_response.strip() and all_final_responses and not is_summary_response:
+        if not final_response.strip() and all_final_responses:
             additional_content = "\n\n".join(all_final_responses)
             await final_msg.stream_token(additional_content)
             final_response = final_msg.content
 
-    # 🔧 요약 응답인 경우 저장하지 않고 종료
-    if is_summary_response:
-        print(f"[DEBUG] 요약 응답으로 감지되어 전체 응답 차단")
-        await final_msg.update()
-        return
-
-    if final_response:
-        # 메시지 끝의 공백 제거 (Anthropic API 에러 방지)
+    # 🔧 4. 메모리에 현재 대화 저장 (핵심!)
+    if final_response and final_response.strip():
         clean_input = message.content.strip()
         clean_output = final_response.strip()
         
-        # 🔧 요약 내용 필터링 적용
-        filtered_output = filter_summary_content(clean_output)
-        
-        # 필터링된 내용이 비어있으면 저장하지 않음
-        if not filtered_output:
-            print(f"[DEBUG] 요약 내용으로 감지되어 저장 건너뜀")
-            await final_msg.update()
-            return
-        
         try:
-            save_message(session_id, "assistant", filtered_output)
+            save_message(session_id, "assistant", clean_output)
             
-            # 세션 메모리 스토어에서 실제 메모리 객체 가져오기
-            session_memory_store = cl.user_session.get("session_memory_store", {})
+            # 🔧 메모리에 현재 대화 즉시 저장
             if session_id in session_memory_store:
                 actual_memory = session_memory_store[session_id]
                 
-                # 🔧 안전한 메모리 저장 처리
                 try:
-                    # 빈 메시지 확인
-                    if not clean_input.strip() or not filtered_output.strip():
-                        print(f"[DEBUG] 빈 메시지 감지 - 메모리 저장 건너뜀")
-                    else:
-                        # 🔧 간단한 ConversationBufferMemory 사용
-                        try:
-                            actual_memory.save_context(
-                                {"input": clean_input},
-                                {"output": filtered_output}
-                            )
-                            print(f"[DEBUG] 메모리 저장 완료")
-                        except Exception as save_error:
-                            print(f"[DEBUG] save_context 실패: {save_error}")
-                            # ConversationBufferMemory는 chat_memory를 직접 사용
-                            try:
-                                actual_memory.chat_memory.add_user_message(clean_input)
-                                actual_memory.chat_memory.add_ai_message(filtered_output)
-                                print("[DEBUG] chat_memory 직접 저장 완료")
-                            except Exception as chat_error:
-                                print(f"[DEBUG] chat_memory 저장도 실패: {chat_error}")
+                    if clean_input and clean_output:
+                        # 🔧 현재 대화를 메모리에 저장
+                        actual_memory.save_context(
+                            {"input": clean_input},
+                            {"output": clean_output}
+                        )
+                        print(f"[DEBUG] 현재 대화 메모리 저장 완료: Q={clean_input[:30]}, A={clean_output[:30]}")
+                        
+                        # 🔧 메모리 상태 확인
+                        updated_vars = actual_memory.load_memory_variables({})
+                        updated_history = updated_vars.get("chat_history", [])
+                        print(f"[DEBUG] 업데이트된 메모리 크기: {len(updated_history)}개 메시지")
                         
                 except Exception as save_error:
-                    print(f"[DEBUG] 메모리 저장 처리 중 오류: {save_error}")
+                    print(f"[DEBUG] 메모리 저장 실패: {save_error}")
+                    # 🔧 대안 방법으로 직접 메모리에 추가
+                    try:
+                        actual_memory.chat_memory.add_user_message(clean_input)
+                        actual_memory.chat_memory.add_ai_message(clean_output)
+                        print("[DEBUG] chat_memory 직접 저장 완료")
+                    except Exception as chat_error:
+                        print(f"[DEBUG] chat_memory 저장도 실패: {chat_error}")
             else:
                 print(f"[DEBUG] 세션 메모리를 찾을 수 없음: {session_id}")
+                # 🔧 메모리가 없으면 새로 생성
+                new_memory = ConversationBufferMemory(
+                    return_messages=True,
+                    memory_key="chat_history"
+                )
+                session_memory_store[session_id] = new_memory
+                new_memory.save_context(
+                    {"input": clean_input},
+                    {"output": clean_output}
+                )
+                print(f"[DEBUG] 새 메모리 생성 및 저장 완료")
 
         except Exception as memory_error:
             print(f"[DEBUG] 메모리 저장 중 전체 오류: {memory_error}")
