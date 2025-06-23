@@ -10,45 +10,48 @@
 - 데이터 처리 및 모델 설정을 위한 다양한 패키지 사용
 
 ## 시스템 구성 요소
+```
 +------------------+
-      |  User  |
+|      User        |
 +--------+---------+
          |
          v
 +-------------------------+
-|  LangGraph ReAct Agent  |
-| (app_chainlit.py)      |
-+-------------------------+
-         |
-         |      Reads / Writes
-         v
+| LangGraph ReAct Agent  |
+|    (app_chainlit.py)   |
++-----------+-------------+
+            |
+            | Reads / Writes
+            v
 +---------------------------+
-|   SQLite DB               |
-| - User Info               |
-| - Memory / History        |
-+---------------------------+
-
-         |
-         |      Loads system prompts
-         v
-+---------------------------+
-| system_prompt.txt         |
+|         SQLite DB         |
+|  - User Info              |
+|  - Memory / History       |
 +---------------------------+
 
-         |
-         |     LLM API Calls
-         v
+            |
+            | Loads system prompts
+            v
++---------------------------+
+|     system_prompt.txt     |
++---------------------------+
+
+            |
+            | LLM API Calls
+            v
 +-----------------------------+
 | Snowflake Cortex MCP Agent |
 +-----------------------------+
 
-         |
-         v
+            |
+            v
 +----------------------------+
-| Docker Container           |
-| - Runs all above modules   |
-| - API exposed via port     |
+|     Docker Container       |
+|  - Runs all above modules  |
+|  - API exposed via port    |
 +----------------------------+
+```
+
 
 
 ## 설치 방법
