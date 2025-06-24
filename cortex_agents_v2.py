@@ -89,7 +89,7 @@ async def execute_sql(sql: str) -> Dict[str, Any]:
             "statement": sql.replace(";", ""),
             "timeout": 120
         }
-        async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
+        async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
             response = await client.post(
                 sql_api_url,
                 json=sql_payload,
@@ -151,7 +151,7 @@ async def search_cortex_documents(query: str, max_results: int = 10) -> Tuple[st
         "Accept": "text/event-stream",
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream(
             "POST",
             url,
@@ -547,7 +547,7 @@ async def run_formatted_analysis(query: str, report_format_id: str = "", format_
         "Accept": "text/event-stream",
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream(
             "POST",
             url,
@@ -721,7 +721,7 @@ async def run_cortex_agents(query: str) -> Dict[str, Any]:
         "Accept": "text/event-stream",
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream(
             "POST",
             url,
