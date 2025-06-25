@@ -5,7 +5,7 @@ import chainlit as cl
 import json
 import pandas as pd
 import io
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import traceback
 import time
 import sqlite3
@@ -46,7 +46,8 @@ from mcp.types import CallToolResult, TextContent
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-current_time = datetime.now().strftime("%Y-%m-%d")
+KST = timezone(timedelta(hours=9))
+current_time = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 try:
     with open("system_prompt.txt", "r", encoding="utf-8") as f:
         SYSTEM_PROMPT = f.read().format(current_time=current_time)
