@@ -46,9 +46,10 @@ from mcp.types import CallToolResult, TextContent
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
+current_time = datetime.now().strftime("%Y-%m-%d")
 try:
     with open("system_prompt.txt", "r", encoding="utf-8") as f:
-        SYSTEM_PROMPT = f.read()
+        SYSTEM_PROMPT = f.read().format(current_time=current_time)
 except FileNotFoundError:
     SYSTEM_PROMPT = "You are a helpful assistant."
     print("경고: system_prompt.txt 파일을 찾을 수 없어 기본 프롬프트를 사용합니다.")
