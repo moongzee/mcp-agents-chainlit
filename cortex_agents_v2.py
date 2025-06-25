@@ -1,4 +1,4 @@
-from typing import Any, Dict, Tuple, List
+from typing import Any, Dict, Tuple, List, Optional
 import httpx
 from mcp.server.fastmcp import FastMCP
 import os
@@ -43,7 +43,17 @@ API_HEADERS = {
 }
 
 
+def safe_string_convert(value: Any) -> str:
+    """안전하게 값을 문자열로 변환"""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 async def process_sse_response(resp: httpx.Response) -> Tuple[str, str, List[Dict]]:
+    """SSE 응답을 처리하여 텍스트, SQL, citations를 추출"""
     text, sql, citations = "", "", []
     async for raw_line in resp.aiter_lines():
         if not raw_line:
@@ -74,14 +84,16 @@ async def process_sse_response(resp: httpx.Response) -> Tuple[str, str, List[Dic
                             sql = j["sql"]
                         for s in j.get("searchResults", []):
                             citations.append({
-                                "source_id": s.get("source_id"),
-                                "doc_id": s.get("doc_id"),
-                                "content": s.get("content", ""),  # 검색된 내용도 포함
+                                "source_id": safe_string_convert(s.get("source_id")),
+                                "doc_id": safe_string_convert(s.get("doc_id")),
+                                "content": safe_string_convert(s.get("content")),
+                                "title": safe_string_convert(s.get("title")),
                             })
     return text, sql, citations
 
 
 async def execute_sql(sql: str) -> Dict[str, Any]:
+    """SQL을 실행하고 결과를 반환"""
     try:
         request_id = str(uuid.uuid4())
         sql_api_url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/statements"
@@ -89,7 +101,7 @@ async def execute_sql(sql: str) -> Dict[str, Any]:
             "statement": sql.replace(";", ""),
             "timeout": 120
         }
-        async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
+        async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
             response = await client.post(
                 sql_api_url,
                 json=sql_payload,
@@ -107,37 +119,81 @@ async def execute_sql(sql: str) -> Dict[str, Any]:
         return {"error": f"SQL execution error: {e}\n{traceback.format_exc()}"}
 
 
-async def search_cortex_documents(query: str, max_results: int = 10) -> Tuple[str, List[Dict]]:
+async def call_cortex_agent(
+    query: str, 
+    use_analyst: bool = True, 
+    use_search: bool = True, 
+    max_search_results: int = 15,
+    search_filters: Optional[Dict] = None,
+    custom_instruction: Optional[str] = None
+) -> Tuple[str, str, List[Dict]]:
     """
-    Cortex Search를 사용하여 문서 검색
+    통합된 Cortex Agent 호출 함수
     
     Args:
-        query (str): 검색할 쿼리
-        max_results (int): 최대 결과 수
-        
-    Returns:
-        Tuple[str, List[Dict]]: (응답 텍스트, 검색 결과 리스트)
+        query: 사용자 질문
+        use_analyst: Analyst 도구 사용 여부
+        use_search: Search 도구 사용 여부  
+        max_search_results: 최대 검색 결과 수
+        search_filters: 검색 필터
+        custom_instruction: 커스텀 응답 지시사항
     """
+    
+    # 기본 응답 지시사항
+    if custom_instruction is None:
+        if use_analyst and use_search:
+            response_instruction = (
+                "You are a helpful data analytics agent. "
+                "1. Use the Analyst1 tool to convert user questions into SQL when data analysis is needed. "
+                "2. Use the Search1 tool to find relevant documents when document search is needed. "
+                "3. Combine results appropriately and provide structured answers."
+            )
+        elif use_analyst:
+            response_instruction = (
+                "You are a data analyst. Use the Analyst1 tool to convert questions into SQL and analyze data."
+            )
+        elif use_search:
+            response_instruction = (
+                "You are a document search assistant. Use the Search1 tool to find relevant information."
+            )
+        else:
+            response_instruction = "Answer the question based on available context."
+    else:
+        response_instruction = custom_instruction
+
+    # 도구 구성
+    tools = []
+    tool_resources = {}
+    
+    if use_analyst:
+        tools.append({"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}})
+        tool_resources["Analyst1"] = {"semantic_model_file": SEMANTIC_MODEL_FILE}
+    
+    if use_search:
+        tools.append({"tool_spec": {"type": "cortex_search", "name": "Search1"}})
+        
+        # 기본 검색 필터
+        default_filters = {"@eq": {"language": "Korean"}}
+        if search_filters:
+            default_filters = search_filters
+            
+        tool_resources["Search1"] = {
+            "name": CORTEX_SEARCH_SERVICE,
+            "max_results": max_search_results,
+            "title_column": "relative_path",
+            "id_column": "doc_id",
+            "filter": default_filters
+        }
+    
+    if use_analyst:
+        tools.append({"tool_spec": {"type": "sql_exec", "name": "sql_execution_tool"}})
+
     payload = {
         "model": "claude-4-sonnet",
-        "response_instruction": (
-            f"Search for documents related to '{query}'. "
-            "Return the search results with document titles, content summaries, and relevance information. "
-            "Focus on finding report templates, formats, and document structures."
-        ),
+        "response_instruction": response_instruction,
         "experimental": {},
-        "tools": [
-            {"tool_spec": {"type": "cortex_search", "name": "Search1"}},
-        ],
-        "tool_resources": {
-            "Search1": {
-                "name": CORTEX_SEARCH_SERVICE,
-                "max_results": max_results,
-                "title_column": "relative_path",
-                "id_column": "doc_id",
-                "filter": {"@eq": {"language": "Korean"}}
-            }
-        },
+        "tools": tools,
+        "tool_resources": tool_resources,
         "tool_choice": {"type": "auto"},
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": query}]}
@@ -151,7 +207,7 @@ async def search_cortex_documents(query: str, max_results: int = 10) -> Tuple[st
         "Accept": "text/event-stream",
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         async with client.stream(
             "POST",
             url,
@@ -160,596 +216,376 @@ async def search_cortex_documents(query: str, max_results: int = 10) -> Tuple[st
             params={"requestId": request_id},
         ) as resp:
             resp.raise_for_status()
-            text, sql, citations = await process_sse_response(resp)
-
-    return text, citations
+            return await process_sse_response(resp)
 
 
-@mcp.tool(description="Get available report format templates by searching the document database")
-async def get_report_formats(search_query: str = "보고서 템플릿 형식") -> Dict[str, Any]:
-    """
-    Cortex Search를 사용하여 사용 가능한 보고서 형식 템플릿을 검색합니다.
+def group_citations_by_document(citations: List[Dict]) -> Dict[str, Dict]:
+    """Citations를 문서별로 그룹화"""
+    documents_by_path = {}
+    for citation in citations:
+        relative_path = citation.get("source_id", "")
+        if not relative_path:
+            continue
+            
+        if relative_path not in documents_by_path:
+            documents_by_path[relative_path] = {
+                "title": citation.get("title", ""),
+                "chunks": [],
+                "source": relative_path
+            }
+            
+        content = citation.get("content", "")
+        if content:
+            documents_by_path[relative_path]["chunks"].append(content)
     
-    Args:
-        search_query (str): 검색할 쿼리 (기본값: "보고서 템플릿 형식")
-        
-    Returns:
-        dict: 검색된 보고서 형식들과 설명
+    return documents_by_path
+
+
+async def generate_styled_report(query: str, data_results: Dict, citations: List[Dict]) -> str:
+    """문서 템플릿을 참고하여 스타일이 적용된 보고서 생성"""
+    
+    # 문서별로 청크들을 그룹화
+    documents_by_path = group_citations_by_document(citations)
+    
+    # 각 문서의 전체 내용을 재구성하여 템플릿 스타일 분석
+    document_styles = []
+    for path, doc_info in documents_by_path.items():
+        combined_content = " ".join(doc_info["chunks"])[:1000]
+        document_styles.append({
+            "title": doc_info["title"],
+            "content_sample": combined_content,
+            "source": path,
+            "chunk_count": len(doc_info["chunks"])
+        })
+    
+    # 보고서 생성을 위한 프롬프트 구성
+    template_instruction = f"""
+    다음 {len(document_styles)}개 문서들의 형태와 어투를 참고하여 데이터 분석 보고서를 작성해주세요:
+    
+    참고 문서 스타일:
     """
+    
+    for i, style in enumerate(document_styles):
+        template_instruction += f"""
+        문서 {i+1}: {style['title']} (청크 수: {style['chunk_count']})
+        내용 샘플: {style['content_sample']}
+        출처: {style['source']}
+        ---
+        """
+    
+    template_instruction += f"""
+    
+    위 문서들의 형식, 어투, 구조를 참고하여 다음 데이터 분석 결과를 바탕으로 보고서를 작성해주세요:
+    
+    사용자 질문: {query}
+    데이터 분석 결과: {json.dumps(data_results, ensure_ascii=False, indent=2)}
+    
+    보고서 작성 시 다음 사항을 고려해주세요:
+    1. 참고 문서의 어투와 형식을 따라주세요
+    2. 데이터에서 도출된 핵심 인사이트를 강조해주세요
+    3. 구체적인 수치와 함께 설명해주세요
+    4. 결론과 제언을 포함해주세요
+    5. 각 문서에서 추출한 스타일 요소들을 종합적으로 반영해주세요
+    """
+    
+    # Cortex Complete API를 사용하여 보고서 생성
+    payload = {
+        "model": "claude-4-sonnet",
+        "messages": [
+            {"role": "user", "content": template_instruction}
+        ],
+        "max_tokens": 2000,
+        "temperature": 0.7
+    }
     
     try:
-        # 보고서 템플릿 관련 문서들 검색
-        search_text, search_results = await search_cortex_documents(search_query, max_results=3)
+        request_id = str(uuid.uuid4())
+        url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/cortex/complete"
         
-        # 검색 결과를 구조화
-        available_formats = []
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                url,
+                json=payload,
+                headers=API_HEADERS,
+                params={"requestId": request_id},
+            )
         
-        for i, result in enumerate(search_results):
-            doc_id = result.get("doc_id", f"doc_{i}")
-            source_id = result.get("source_id", "")
-            content = result.get("content", "")
-            
-            # 문서 제목에서 보고서 형식 추출 시도
-            if source_id:
-                format_name = source_id.split("/")[-1] if "/" in source_id else source_id
-                format_name = format_name.replace(".pdf", "").replace(".docx", "").replace("_", " ")
-            else:
-                format_name = f"보고서 형식 {i+1}"
-            
-            # 내용에서 핵심 설명 추출 (처음 200자)
-            description = content[:200] + "..." if len(content) > 200 else content
-            
-            # 실제 문서 항목에 따른 보고서 형식 분류
-            format_type = "기본"
-            content_lower = content.lower()
-            source_lower = source_id.lower() if source_id else ""
-            
-            # 문서 경로/제목과 내용을 모두 고려하여 분류
-            if any(keyword in content_lower or keyword in source_lower for keyword in ["용어사전", "glossary", "dictionary", "용어", "정의"]):
-                format_type = "비즈니스 용어사전"
-            elif any(keyword in content_lower or keyword in source_lower for keyword in ["내부보고", "내부 보고", "internal", "팀보고", "부서보고"]):
-                format_type = "내부보고자료"
-            elif any(keyword in content_lower or keyword in source_lower for keyword in ["트렌드", "trend", "시장동향", "업계동향", "전망"]):
-                format_type = "트렌드 자료"
-            elif any(keyword in content_lower or keyword in source_lower for keyword in ["경영자", "컨설팅", "consulting", "전략", "strategy", "임원"]):
-                format_type = "경영자 컨설팅 자료"
-            elif any(keyword in content_lower or keyword in source_lower for keyword in ["상부보고", "상부 보고", "경영진", "ceo", "임원보고", "executive"]):
-                format_type = "상부보고자료"
-            # 추가적인 세부 분류 (기존 로직 유지)
-            elif any(keyword in content_lower for keyword in ["ebg", "피드백", "우선순위", "문제점"]):
-                format_type = "EBG 피드백"
-            elif any(keyword in content_lower for keyword in ["정량", "수치", "지표", "kpi", "성과측정"]):
-                format_type = "정량분석"
-            elif any(keyword in content_lower for keyword in ["종합", "현황", "전체", "overview"]):
-                format_type = "종합현황"
-            
-            available_formats.append({
-                "id": doc_id,
-                "name": format_name,
-                "type": format_type,
-                "description": description,
-                "source_document": source_id,
-                "relevance_score": len([k for k in ["보고서", "템플릿", "형식"] if k in content.lower()])
-            })
-        
-        # 관련성 점수로 정렬
-        available_formats.sort(key=lambda x: x["relevance_score"], reverse=True)
-        
-        # 상위 8개만 선택 (너무 많으면 혼란)
-        top_formats = available_formats[:8]
-        
-        return {
-            "success": True,
-            "search_query": search_query,
-            "total_found": len(search_results),
-            "available_formats": top_formats,
-            "search_summary": search_text[:500] + "..." if len(search_text) > 500 else search_text,
-            "raw_search_results": search_results  # 원본 검색 결과도 포함
-        }
-        
-    except Exception as e:
-        logging.error(f"보고서 형식 검색 중 오류: {e}")
-        traceback.print_exc()
-        
-        # 오류 시 실제 문서 타입 기반 기본 형식 반환
-        return {
-            "success": False,
-            "error": str(e),
-            "available_formats": [
-                {
-                    "id": "default_internal",
-                    "name": "내부보고자료",
-                    "type": "내부보고자료",
-                    "description": "팀/부서 내부용 보고서 - 실무진 대상의 상세 분석 자료",
-                    "source_document": "기본 템플릿"
-                },
-                {
-                    "id": "default_executive",
-                    "name": "상부보고자료", 
-                    "type": "상부보고자료",
-                    "description": "경영진/임원진 대상 보고서 - 핵심 메트릭스와 전략적 시사점",
-                    "source_document": "기본 템플릿"
-                },
-                {
-                    "id": "default_trend",
-                    "name": "트렌드 자료",
-                    "type": "트렌드 자료", 
-                    "description": "시장 동향 및 업계 트렌드 분석 자료",
-                    "source_document": "기본 템플릿"
-                },
-                {
-                    "id": "default_consulting",
-                    "name": "경영자 컨설팅 자료",
-                    "type": "경영자 컨설팅 자료",
-                    "description": "전략적 관점의 비즈니스 인사이트 및 액션 플랜",
-                    "source_document": "기본 템플릿"
-                },
-                {
-                    "id": "default_glossary",
-                    "name": "비즈니스 용어사전",
-                    "type": "비즈니스 용어사전",
-                    "description": "전문 용어 정의 및 비즈니스 컨텍스트 설명",
-                    "source_document": "기본 템플릿"
-                }
-            ]
-        }
-
-
-@mcp.tool(description="Run Cortex analysis with specific report format guidance from searched templates")
-async def run_formatted_analysis(query: str, report_format_id: str = "", format_type: str = "기본") -> Dict[str, Any]:
-    """
-    특정 보고서 형식에 맞춰 Cortex 분석을 실행합니다.
-    
-    Args:
-        query (str): 분석할 사용자 질문
-        report_format_id (str): get_report_formats에서 얻은 보고서 형식 ID
-        format_type (str): 보고서 형식 타입 (EBG 피드백, 정량분석, 종합현황, 기본)
-        
-    Returns:
-        dict: 지정된 형식에 맞춘 분석 결과
-    """
-    
-    # 실제 문서 타입에 따른 분석 지시사항 + 환각 방지 규칙
-    format_instructions = {
-        "비즈니스 용어사전": (
-            "임베딩된 문서들에서 비즈니스 용어를 추출하여 용어사전 형식으로 분석하세요. "
-            "🔥 중요: 실제 용어사전 문서가 없으므로, Search1 도구로 패션/경영/트렌드 관련 문서들을 검색하여 "
-            "그 안에서 전문 용어들을 찾아내고 정의하세요.\n"
-            "1) **용어 검색**: '패션', '경영', '트렌드', '컨설팅' 등으로 기존 문서 검색\n"
-            "2) **용어 추출**: 검색된 문서에서 전문 용어들 (예: MBWA, 직접체험관매, 정판율 등) 식별\n"
-            "3) **맥락 정의**: 문서 내용을 바탕으로 해당 용어들의 정의와 사용 맥락 파악\n"
-            "4) **데이터 연계**: 용어와 관련된 실제 데이터가 있으면 Analyst1으로 조회\n"
-            "5) **용어사전 형식**: 추출한 용어들을 체계적인 용어사전 보고서 형식으로 정리\n"
-            "기존 임베딩 문서들을 적극 활용하여 해당 조직/업계의 실제 용어들을 정의하세요.\n\n"
-            "⚠️ 환각 방지 규칙: 임의로 용어를 만들지 말고, 반드시 검색된 문서에서 실제 사용된 용어들만 정의하세요."
-        ),
-        "내부보고자료": (
-            "내부보고자료 형식으로 분석하세요. "
-            "팀/부서 내부용 보고서 스타일로 작성하며, "
-            "실무진이 이해하기 쉬운 구체적인 데이터와 실행 가능한 인사이트를 제공하세요. "
-            "상세한 프로세스와 근거를 포함하세요.\n\n"
-            "⚠️ 환각 방지 규칙: 보고일자, 작성부서, 보고대상 등은 실제 데이터나 검색된 문서에 있는 경우에만 사용하세요."
-        ),
-        "트렌드 자료": (
-            "트렌드 분석 자료 형식으로 분석하세요. "
-            "시장 동향, 업계 트렌드, 미래 전망에 중점을 두고, "
-            "시계열 분석과 변화 패턴을 포함하여 작성하세요. "
-            "경쟁사 비교와 시장 포지셔닝 관점을 추가하세요.\n\n"
-            "⚠️ 환각 방지 규칙: 추측이나 가정이 아닌 실제 데이터와 검색된 문서 내용만 사용하세요."
-        ),
-        "경영자 컨설팅 자료": (
-            "경영자 컨설팅 자료 형식으로 분석하세요. "
-            "전략적 관점에서 비즈니스 인사이트를 제공하고, "
-            "의사결정 지원을 위한 다각도 분석과 리스크 평가, "
-            "구체적인 액션 플랜과 ROI 예측을 포함하세요.\n\n"
-            "⚠️ 환각 방지 규칙: 가상의 전략이나 추정치가 아닌 실제 데이터 기반의 분석만 제공하세요."
-        ),
-        "상부보고자료": (
-            "상부보고자료 형식으로 분석하세요. "
-            "경영진/임원진 대상 보고서 스타일로 작성하며, "
-            "핵심 메트릭스와 전략적 시사점에 집중하세요. "
-            "간결하면서도 임팩트 있는 요약과 명확한 결론을 제시하세요.\n\n"
-            "⚠️ 환각 방지 규칙: 실제 승인자나 보고 대상이 명시된 경우에만 해당 정보를 포함하세요."
-        ),
-        "EBG 피드백": (
-            "EBG 피드백 보고서 형식으로 분석하세요. "
-            "우선순위별 문제점을 식별하고, 각 우선순위마다 다음을 포함하세요: "
-            "1) 현재 성과 vs 목표 (구체적 수치) "
-            "2) 근본 원인 분석 (버그) "
-            "3) 구체적 해결방안 (대안) "
-            "문제해결 중심의 접근법을 사용하세요.\n\n"
-            "⚠️ 환각 방지 규칙: 실제 데이터에 없는 목표치나 성과 수치를 임의로 생성하지 마세요."
-        ),
-        "정량분석": (
-            "정량분석 보고서 형식으로 분석하세요. "
-            "정확한 지표, 성장률, 통계적 인사이트에 집중하세요. "
-            "카테고리별, 기간별 상세 분석과 비교 분석을 포함하세요. "
-            "구체적인 백분율, 비율, 트렌드 계산을 제공하세요.\n\n"
-            "⚠️ 환각 방지 규칙: 모든 수치와 계산은 실제 조회된 데이터에 기반해야 하며, 추정치는 명확히 표시하세요."
-        ),
-        "종합현황": (
-            "종합현황 보고서 형식으로 분석하세요. "
-            "모든 핵심 영역의 전체적인 성과 관점을 제공하세요. "
-            "부서별 분석, 트렌드 분석, 예측 요소, "
-            "비즈니스 계획에 대한 전략적 시사점을 포함하세요.\n\n"
-            "⚠️ 환각 방지 규칙: 부서명, 조직 구조, 비즈니스 계획은 실제 검색된 문서에 있는 내용만 사용하세요."
-        ),
-        "기본": (
-            "간결하고 전문적인 요약과 핵심 인사이트, 실행 가능한 결론을 제공하세요.\n\n"
-            "⚠️ 환각 방지 규칙: 실제 데이터와 검색 결과에 기반한 내용만 제공하세요."
-        )
-    }
-    
-    # 🔧 개선된 템플릿 검색 - 다양한 검색 시도
-    template_guidance = ""
-    template_documents = []
-    
-    # 여러 검색 쿼리로 관련 문서 찾기
-    search_queries = []
-    
-    if report_format_id:
-        search_queries.append(f"보고서 템플릿 {report_format_id}")
-        search_queries.append(f"{report_format_id} 형식")
-    
-    if format_type != "기본":
-        # 형식별 맞춤 검색 키워드
-        if format_type == "비즈니스 용어사전":
-            # 🔍 질문에서 핵심 용어 추출하여 직접 검색
-            import re
-            # 질문에서 비즈니스 용어 가능성이 있는 단어들 추출
-            potential_terms = re.findall(r'[가-힣]+(?:율|률|지표|KPI|성과|매출|수익|브랜드|정판|할인|마진)', query, re.IGNORECASE)
-            
-            for term in potential_terms:
-                search_queries.append(term)  # 용어 직접 검색
-                search_queries.append(f"{term} 정의")
-                search_queries.append(f"{term} 의미")
-            
-            # 기본 용어사전 검색도 추가
-            search_queries.extend([
-                "용어사전",
-                "비즈니스 용어",
-                "용어 정의"
-            ])
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("choices", [{}])[0].get("message", {}).get("content", "보고서 생성에 실패했습니다.")
         else:
-            search_queries.extend([
-                f"{format_type} 템플릿",
-                f"{format_type} 양식", 
-                f"{format_type} 구조",
-                f"{format_type} 예시",
-                format_type
-            ])
+            return f"보고서 생성 API 오류: {response.status_code} {response.text}"
     
-    # 각 검색 쿼리 시도
-    for search_query in search_queries:
-        try:
-            template_text, template_results = await search_cortex_documents(search_query, max_results=5)
-            if template_results:
-                template_documents.extend(template_results)
-                logging.info(f"템플릿 검색 성공: '{search_query}' -> {len(template_results)}개 문서")
-                break  # 첫 번째 성공한 검색으로 충분하면 중단
-        except Exception as e:
-            logging.warning(f"템플릿 검색 '{search_query}' 실패: {e}")
-            continue
+    except Exception as e:
+        logging.error("Report generation error: %s\n%s", e, traceback.format_exc())
+        return f"보고서 생성 중 오류 발생: {e}"
+
+
+def detect_query_intent(query: str) -> str:
+    """사용자 질문의 의도를 파악"""
+    query_lower = safe_string_convert(query).lower()
     
-    # 검색된 템플릿 문서들을 guidance로 구성
-    if template_documents:
-        # 중복 제거 및 관련성 높은 문서 우선
-        unique_docs = {}
-        for doc in template_documents:
-            doc_id = doc.get("doc_id", "")
-            if doc_id not in unique_docs:
-                unique_docs[doc_id] = doc
-        
-        # 템플릿 내용 추출 및 구조화
-        template_parts = []
-        for doc in list(unique_docs.values())[:3]:  # 상위 3개 문서만 사용
-            content = doc.get("content", "")
-            source = doc.get("source_id", "")
-            
-            if content:
-                # 내용을 적절한 길이로 요약
-                content_summary = content[:500] + "..." if len(content) > 500 else content
-                template_parts.append(f"📄 {source}: {content_summary}")
-        
-        if template_parts:
-            template_guidance = "\n\n".join(template_parts)
-            logging.info(f"템플릿 가이던스 생성 완료: {len(template_parts)}개 문서 참조")
-    else:
-        logging.warning(f"'{format_type}' 형식의 템플릿 문서를 찾을 수 없음")
+    # 보고서 목록 요청 키워드들
+    report_list_keywords = [
+        "보고서목록", "보고서 목록", "사용가능한 보고서", "available reports",
+        "문서목록", "문서 목록", "어떤 문서", "어떤 보고서", "뭐가 있어", "뭐가있어",
+        "목록", "리스트", "list", "documents", "reports", "파일목록", "파일 목록"
+    ]
     
-    # 🔧 더 구체적인 지시사항 구성 (형식별 특화)
-    enhanced_instruction = format_instructions.get(format_type, format_instructions["기본"])
+    if any(keyword in query_lower for keyword in report_list_keywords):
+        return "report_list"
     
-    # 비즈니스 용어사전 형식에 대한 특별 처리
-    if format_type == "비즈니스 용어사전":
-        enhanced_instruction += """
-
-🎯 비즈니스 용어사전 형식 작성 가이드:
-- 🔍 STEP 1: 질문에서 핵심 용어를 추출하여 Search1으로 반드시 검색
-- 📚 STEP 2: 검색된 용어사전 문서의 정의를 직접 인용하여 사용
-- 🔗 STEP 3: 용어사전의 설명과 실제 데이터를 연결하여 분석
-- 📊 STEP 4: 용어와 관련된 현황 데이터를 Analyst1으로 조회
-- 📝 STEP 5: 용어사전 기반의 정확하고 권위 있는 해석 제공
-
-⚠️ 주의사항: 
-- 임의로 용어를 정의하지 말고 반드시 용어사전 검색 결과를 우선 사용
-- 용어사전에서 찾은 내용은 "용어사전에 따르면..." 형태로 명시적 인용
-- 검색된 용어사전 내용이 없으면 일반적 정의 후 "용어사전 검색 필요" 언급
-"""
+    # 데이터 분석 키워드들  
+    analysis_keywords = [
+        "분석", "조회", "데이터", "통계", "집계", "합계", "평균", "최대", "최소",
+        "sql", "select", "where", "group by", "분석해줘", "보여줘"
+    ]
     
-    # 템플릿 문서가 있으면 구체적인 참조 지시
-    if template_guidance:
-        enhanced_instruction = f"""
-{enhanced_instruction}
-
-🔥 중요: 아래 실제 문서들을 반드시 참조하여 형식을 맞춰주세요:
-
-{template_guidance}
-
-위 문서들의 구조, 용어, 스타일을 최대한 따라서 작성하세요. 단순히 일반적인 분석이 아니라, 실제 조직에서 사용하는 {format_type} 형식의 특징을 정확히 반영해주세요.
-"""
-    else:
-        # 템플릿이 없으면 Search1 도구 적극 활용 지시
-        enhanced_instruction = f"""
-{enhanced_instruction}
-
-🔍 중요: Search1 도구를 사용하여 '{format_type}' 관련 문서들을 적극적으로 검색하고 참조하세요. 
-검색 키워드 예시: "{format_type} 양식", "{format_type} 템플릿", "{format_type} 구조"
-검색된 문서의 실제 형식과 구조를 따라서 분석 보고서를 작성하세요.
-"""
+    if any(keyword in query_lower for keyword in analysis_keywords):
+        return "data_analysis"
     
-    payload = {
-        "model": "claude-4-sonnet",
-        "response_instruction": (
-            f"{enhanced_instruction}\n\n"
-            f"🎯 실행 지침:\n"
-            f"1. {'🔍 CRITICAL: 먼저 Search1 도구로 질문의 핵심 용어들을 반드시 검색하세요' if format_type == '비즈니스 용어사전' else '먼저 Search1 도구로 관련 문서들을 검색하세요'}\n"
-            f"2. {'📚 검색된 용어사전 내용을 직접 인용하고 참조하세요' if format_type == '비즈니스 용어사전' else '검색된 문서의 구조와 형식을 분석하세요'}\n" 
-            f"3. Analyst1 도구로 관련 데이터를 조회하세요\n"
-            f"4. {'용어사전 정의 + 실제 데이터를 결합하여 분석하세요' if format_type == '비즈니스 용어사전' else '검색된 문서의 실제 형식을 따라 결과를 구성하세요'}\n"
-            f"5. {format_type}의 고유한 특징을 반영한 전문적 보고서로 작성하세요\n\n"
-            f"🚨 중요한 환각 방지 규칙:\n"
-            f"- 보고일자: 실제 데이터 조회 날짜가 있는 경우에만 사용하고, 없으면 '데이터 기준일: 조회일 기준' 등으로 명시\n"
-            f"- 작성부서: 검색된 문서에 명시된 부서명만 사용하고, 없으면 생략하거나 '해당없음'으로 표시\n"
-            f"- 보고대상: 실제 문서에서 확인된 승인자/수신자만 사용하고, 없으면 생략\n"
-            f"- 조직정보: 검색된 문서에서 확인할 수 없는 조직 구조나 직책은 임의로 생성하지 말 것\n"
-            f"- 수치데이터: Analyst1 도구로 조회된 실제 데이터만 사용하고, 추정치는 명확히 '추정' 표시\n"
-            f"- 날짜정보: 실제 데이터의 기준일이나 업데이트일만 사용하고, 임의의 날짜 생성 금지\n\n"
-            f"{'🔥 비즈니스 용어사전 특별 지시: 질문에 포함된 모든 비즈니스 용어들을 Search1으로 검색하고, 임베딩된 용어사전 데이터에서 정확한 정의를 찾아 인용하세요. 용어사전에 없는 내용은 추측하지 말고 명시하세요.' if format_type == '비즈니스 용어사전' else ''}\n"
-            f"실제 데이터와 검색된 문서 내용만을 기반으로 하여 정확하고 신뢰할 수 있는 분석을 제공하세요."
-        ),
-        "experimental": {},
-        "tools": [
-            {"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}},
-            {"tool_spec": {"type": "cortex_search", "name": "Search1"}},
-            {"tool_spec": {"type": "sql_exec", "name": "sql_execution_tool"}},
-        ],
-        "tool_resources": {
-            "Analyst1": {"semantic_model_file": SEMANTIC_MODEL_FILE},
-            "Search1": {
-                "name": CORTEX_SEARCH_SERVICE,
-                "max_results": 8,  # 더 많은 문서 검색
-                "title_column": "relative_path",
-                "id_column": "doc_id",
-                "filter": {"@eq": {"language": "Korean"}}
-            }
-        },
-        "tool_choice": {"type": "auto"},
-        "messages": [
-            {"role": "user", "content": [{"type": "text", "text": f"{query} (보고서 형식: {format_type})"}]}
-        ],
-    }
-
-    request_id = str(uuid.uuid4())
-    url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/cortex/agent:run"
-    headers = {
-        **API_HEADERS,
-        "Accept": "text/event-stream",
-    }
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        async with client.stream(
-            "POST",
-            url,
-            json=payload,
-            headers=headers,
-            params={"requestId": request_id},
-        ) as resp:
-            resp.raise_for_status()
-            text, sql, citations = await process_sse_response(resp)
-
-    results = await execute_sql(sql) if sql else None
-
-    return {
-        "text": text,
-        "citations": citations,
-        "sql": sql,
-        "results": results,
-        "applied_format": format_type,
-        "format_id": report_format_id,
-        "template_guidance_used": bool(template_guidance)
-    }
+    # 문서 검색 키워드들
+    search_keywords = [
+        "찾아줘", "검색", "문서", "내용", "정보", "자료", "참고"
+    ]
+    
+    if any(keyword in query_lower for keyword in search_keywords):
+        return "document_search"
+    
+    # 기본값은 통합 분석
+    return "integrated_analysis"
 
 
-@mcp.tool(description="Smart Cortex Agent that automatically detects optimal report format and provides formatted analysis")
-async def run_cortex_agents(query: str) -> Dict[str, Any]:
+@mcp.tool(description="Unified Cortex Agent that handles data analysis, document search, and report generation based on query intent.")
+async def cortex_unified_agent(
+    query: str, 
+    force_mode: Optional[str] = None,
+    include_styled_report: bool = False,
+    max_search_results: int = 15
+) -> Dict[str, Any]:
     """
-    지능형 Cortex Agent: 쿼리를 분석하여 최적의 보고서 형식을 자동 감지하고 해당 형식으로 분석을 수행합니다.
-
-    This tool analyzes the user query to automatically detect the most appropriate report format
-    and performs the analysis using that format. Falls back to basic analysis if no specific format is detected.
-
+    통합된 Cortex Agent 도구 - 질문 의도에 따라 적절한 기능을 자동 선택
+    
     Args:
-        query (str): The user's natural language question to analyze.
-
+        query: 사용자 질문
+        force_mode: 강제 모드 ("data_analysis", "document_search", "report_list", "integrated_analysis")
+        include_styled_report: 스타일이 적용된 보고서 생성 여부
+        max_search_results: 최대 검색 결과 수
+    
     Returns:
-        dict: A dictionary containing:
-            - text (str): The natural language response from the agent
-            - sql (str): The generated SQL query
-            - citations (List[dict]): List of document sources cited
-            - results (dict): Raw execution result from the Snowflake SQL API
-            - detected_format (str): The automatically detected report format
-            - confidence_score (int): Confidence level of format detection (0-5)
-            - applied_formatted_analysis (bool): Whether formatted analysis was applied
+        dict: 통합된 분석 결과
     """
     
-    # 🎯 쿼리 분석하여 최적 형식 자동 감지
-    query_lower = query.lower()
-    detected_format = "기본"
-    confidence_score = 0
+    # 질문 의도 파악
+    intent = force_mode if force_mode else detect_query_intent(query)
     
-    # 형식별 키워드 매핑 (우선순위 포함)
-    format_keywords = {
-        "비즈니스 용어사전": {
-            "keywords": ["용어", "정의", "의미", "뜻", "설명", "무엇", "개념", "정확한"],
-            "priority": 5  # 가장 높은 우선순위
-        },
-        "내부보고자료": {
-            "keywords": ["상세", "자세", "세부", "깊이", "구체적", "상세하게", "완전한", "전체적", "심층"],
-            "priority": 4
-        },
-        "상부보고자료": {
-            "keywords": ["요약", "간단", "핵심", "간략", "요점", "summary", "경영진", "임원", "상부"],
-            "priority": 4
-        },
-        "트렌드 자료": {
-            "keywords": ["트렌드", "동향", "변화", "추세", "전망", "예측", "흐름", "미래", "시장"],
-            "priority": 3
-        },
-        "경영자 컨설팅 자료": {
-            "keywords": ["전략", "개선", "방향", "제안", "솔루션", "방안", "컨설팅", "최적화"],
-            "priority": 3
-        }
-    }
-    
-    # 각 형식별 매칭 점수 계산
-    format_scores = {}
-    for format_type, info in format_keywords.items():
-        score = 0
-        keywords = info["keywords"]
-        priority = info["priority"]
-        
-        # 키워드 매칭 점수
-        matched_keywords = [kw for kw in keywords if kw in query_lower]
-        if matched_keywords:
-            score = len(matched_keywords) * priority
-            format_scores[format_type] = {
-                "score": score,
-                "matched_keywords": matched_keywords,
-                "priority": priority
+    try:
+        if intent == "report_list":
+            # 보고서 목록 반환
+            text, sql, citations = await call_cortex_agent(
+                "시스템에 있는 모든 문서와 보고서 목록을 보여주세요",
+                use_analyst=False,
+                use_search=True,
+                max_search_results=50
+            )
+            
+            # 중복 제거된 문서 목록 생성
+            unique_documents = {}
+            for citation in citations:
+                relative_path = citation.get("source_id", "")
+                if relative_path and relative_path not in unique_documents:
+                    content = citation.get("content", "")
+                    unique_documents[relative_path] = {
+                        "relative_path": relative_path,
+                        "title": citation.get("title", ""),
+                        "doc_id": citation.get("doc_id", ""),
+                        "sample_content": content[:200] if content else ""
+                    }
+            
+            # 문서 타입별 분류
+            document_types = {}
+            for path, doc_info in unique_documents.items():
+                if "." in path:
+                    ext = path.split(".")[-1].split("_")[0]
+                else:
+                    ext = "unknown"
+                
+                if ext not in document_types:
+                    document_types[ext] = []
+                document_types[ext].append(doc_info)
+            
+            # 사용자 친화적인 응답 생성
+            if unique_documents:
+                response_text = f"📋 **사용 가능한 보고서 목록** (총 {len(unique_documents)}개)\n\n"
+                
+                for doc_type, docs in document_types.items():
+                    response_text += f"**{doc_type.upper()} 파일 ({len(docs)}개):**\n"
+                    for doc in docs:
+                        response_text += f"• {doc['relative_path']}\n"
+                        if doc['sample_content']:
+                            response_text += f"  └ 내용 미리보기: {doc['sample_content']}...\n"
+                    response_text += "\n"
+                
+                response_text += "위 보고서들을 활용하여 데이터 분석이나 문서 검색을 요청하실 수 있습니다."
+            else:
+                response_text = "❌ 현재 사용 가능한 보고서를 찾을 수 없습니다."
+            
+            return {
+                "intent": intent,
+                "response": response_text,
+                "unique_documents": list(unique_documents.values()),
+                "document_types": document_types,
+                "total_documents": len(unique_documents)
             }
-    
-    # 가장 높은 점수의 형식 선택
-    if format_scores:
-        best_format = max(format_scores.items(), key=lambda x: x[1]["score"])
-        detected_format = best_format[0]
-        confidence_score = best_format[1]["score"]
-        matched_keywords = best_format[1]["matched_keywords"]
         
-        logging.info(f"형식 자동 감지: {detected_format} (점수: {confidence_score}, 키워드: {matched_keywords})")
-    
-    # 🔥 자동 형식 적용 조건
-    # 신뢰도가 3 이상이면 자동으로 해당 형식 적용
-    if confidence_score >= 3:
-        logging.info(f"자동 형식 적용: {detected_format} (신뢰도: {confidence_score})")
+        elif intent == "data_analysis":
+            # 데이터 분석 수행
+            text, sql, citations = await call_cortex_agent(
+                query,
+                use_analyst=True,
+                use_search=False,
+                max_search_results=max_search_results
+            )
+            
+            # SQL 실행
+            results = await execute_sql(sql) if sql else None
+            
+            response_data = {
+                "intent": intent,
+                "response": text,
+                "sql": sql,
+                "results": results,
+                "citations": citations
+            }
+            
+            # 스타일이 적용된 보고서 생성 (요청 시)
+            if include_styled_report and citations:
+                styled_report = await generate_styled_report(query, results or {}, citations)
+                response_data["styled_report"] = styled_report
+            
+            return response_data
         
-        try:
-            # run_formatted_analysis 호출
-            formatted_result = await run_formatted_analysis(query, "", detected_format)
+        elif intent == "document_search":
+            # 문서 검색 수행
+            text, sql, citations = await call_cortex_agent(
+                query,
+                use_analyst=False,
+                use_search=True,
+                max_search_results=max_search_results
+            )
             
-            # 결과에 자동 감지 정보 추가
-            formatted_result.update({
-                "detected_format": detected_format,
-                "confidence_score": confidence_score,
-                "applied_formatted_analysis": True,
-                "detection_method": "automatic_keyword_matching"
-            })
+            return {
+                "intent": intent,
+                "response": text,
+                "citations": citations,
+                "found_documents": len(citations)
+            }
+        
+        else:  # integrated_analysis
+            # 통합 분석 (데이터 + 문서)
+            text, sql, citations = await call_cortex_agent(
+                query,
+                use_analyst=True,
+                use_search=True,
+                max_search_results=max_search_results
+            )
             
-            return formatted_result
+            # SQL 실행
+            results = await execute_sql(sql) if sql else None
             
-        except Exception as e:
-            logging.error(f"자동 형식 분석 실패: {e}, 기본 분석으로 폴백")
-            # 형식 분석 실패 시 기본 분석 계속 진행
+            response_data = {
+                "intent": intent,
+                "response": text,
+                "sql": sql,
+                "results": results,
+                "citations": citations
+            }
+            
+            # 스타일이 적용된 보고서 생성 (요청 시)
+            if include_styled_report and citations:
+                styled_report = await generate_styled_report(query, results or {}, citations)
+                response_data["styled_report"] = styled_report
+            
+            return response_data
     
-    # 🔧 기본 분석 수행 (신뢰도가 낮거나 형식 분석 실패 시)
-    logging.info(f"기본 분석 수행 (감지된 형식: {detected_format}, 신뢰도: {confidence_score})")
+    except Exception as e:
+        logging.error(f"Error in cortex_unified_agent: {e}")
+        return {
+            "intent": intent,
+            "error": str(e),
+            "response": f"처리 중 오류가 발생했습니다: {e}"
+        }
+
+
+@mcp.tool(description="Generate comprehensive analysis reports with document template styling.")
+async def generate_comprehensive_report(
+    query: str,
+    template_documents: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    포괄적인 분석 보고서 생성 (문서 템플릿 스타일 적용)
     
-    payload = {
-        "model": "claude-4-sonnet",
-        "response_instruction": (
-            "You are a helpful data analytics agent. "
-            "1. Always use the Analyst1 tool to convert user questions into SQL, referencing the provided semantic model. "
-            "2. Use the Search1 tool to find relevant documentation that might help interpret the data context. "
-            "3. Combine the SQL execution results and search results into a concise, structured answer. "
-            "4. For SQL generation, ensure queries are safe and match the schema in the semantic model file. "
-            "5. Respond in a structured format: natural language answer first, then SQL, then citations. "
-            f"6. 💡 Note: This appears to be a request for {detected_format} style analysis based on keywords detected.\n\n"
-            "🚨 CRITICAL ANTI-HALLUCINATION RULES:\n"
-            "- Report dates: Only use actual data query dates, never fabricate dates like '2025년 1월 기준'\n"
-            "- Department names: Only use department names found in searched documents, never invent them\n"
-            "- Report recipients: Only mention actual recipients if found in documents, otherwise omit\n"
-            "- Organization info: Never create fictional organizational structures or job titles\n"
-            "- Data values: Only use data retrieved from Analyst1 tool, mark any estimates clearly\n"
-            "- Use only factual information from actual data queries and document searches"
-        ),
-        "experimental": {},
-        "tools": [
-            {"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}},
-            {"tool_spec": {"type": "cortex_search",            "name": "Search1"}},
-            {"tool_spec": {"type": "sql_exec", "name": "sql_execution_tool"}},
-        ],
-        "tool_resources": {
-            "Analyst1": {"semantic_model_file": SEMANTIC_MODEL_FILE},
-            "Search1": {
-                "name": CORTEX_SEARCH_SERVICE,
-                "max_results": 3,
-                "title_column": "relative_path",
-                "id_column": "doc_id",
-                "filter": {"@eq": {"language": "Korean"}}
-                }
-        },
-        "tool_choice": {"type": "auto"},
-        "messages": [
-            {"role": "user", "content": [{"type": "text", "text": query}]}
-        ],
-    }
-
-    request_id = str(uuid.uuid4())
-    url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/cortex/agent:run"
-    headers = {
-        **API_HEADERS,
-        "Accept": "text/event-stream",
-    }
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        async with client.stream(
-            "POST",
-            url,
-            json=payload,
-            headers=headers,
-            params={"requestId": request_id},
-        ) as resp:
-            resp.raise_for_status()
-            text, sql, citations = await process_sse_response(resp)
-
-    results = await execute_sql(sql) if sql else None
-
+    Args:
+        query: 분석 질문
+        template_documents: 템플릿으로 사용할 문서 경로 목록
+    
+    Returns:
+        dict: 포괄적인 분석 보고서
+    """
+    
+    # 1단계: 통합 분석 수행
+    analysis_result = await cortex_unified_agent(
+        query, 
+        force_mode="integrated_analysis",
+        include_styled_report=False,
+        max_search_results=20
+    )
+    
+    # 2단계: 템플릿 문서 추가 검색 (지정된 경우)
+    template_citations = []
+    if template_documents:
+        for doc_path in template_documents:
+            try:
+                text, sql, citations = await call_cortex_agent(
+                    f"문서 {doc_path}의 내용을 찾아주세요",
+                    use_analyst=False,
+                    use_search=True,
+                    max_search_results=10,
+                    search_filters={
+                        "@and": [
+                            {"@eq": {"language": "Korean"}},
+                            {"@eq": {"relative_path": doc_path}}
+                        ]
+                    }
+                )
+                template_citations.extend(citations)
+            except Exception as e:
+                logging.warning(f"템플릿 문서 {doc_path} 검색 실패: {e}")
+    
+    # 3단계: 스타일이 적용된 보고서 생성
+    all_citations = analysis_result.get("citations", []) + template_citations
+    styled_report = ""
+    
+    if all_citations:
+        styled_report = await generate_styled_report(
+            query, 
+            analysis_result.get("results", {}), 
+            all_citations
+        )
+    
     return {
-        "text": text,
-        "citations": citations,
-        "sql": sql,
-        "results": results,
-        "detected_format": detected_format,
-        "confidence_score": confidence_score,
-        "applied_formatted_analysis": False,  # 기본 분석이므로 False
-        "detection_method": "keyword_analysis_insufficient_confidence"
+        "original_analysis": analysis_result,
+        "styled_report": styled_report,
+        "template_documents_used": template_documents or [],
+        "total_template_citations": len(template_citations),
+        "has_styled_report": bool(styled_report)
     }
 
 
 if __name__ == "__main__":
     try:
-        logging.info("Cortex Agent MCP 서버 시작...")
-        mcp.run(transport="stdio")  # Claude는 stdio 기반 JSON-RPC 만 허용함
+        logging.info("Optimized Cortex Agent MCP 서버 시작...")
+        mcp.run(transport="stdio")
     except KeyboardInterrupt:
         logging.info("Cortex Agent MCP 서버가 사용자에 의해 중단되었습니다.")
     except Exception as e:
