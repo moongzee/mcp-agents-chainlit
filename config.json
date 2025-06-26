@@ -1,15 +1,18 @@
 {
-    "korea-weather": {
-      "command": "python",
+    "google-calendar": {
+      "command": "docker",
       "args": [
-        "korea_weather.py"
+        "run",
+        "--rm",
+        "-i",
+        "mcp/google-calendar"
       ],
       "transport": "stdio"
     },
-    "snowflake-cortex": {
+    "cortex-agents-v2": {
       "command": "python",
       "args": [
-        "cortex_agents.py"
+        "cortex_agents_v2.py"
       ],
       "transport": "stdio"
     }

@@ -2,6 +2,8 @@
 
 # --- 1. 기본 라이브러리 임포트 ---
 import chainlit as cl
+import chainlit.types as cl_types
+import chainlit.server as cl_server 
 import json
 import pandas as pd
 import io
@@ -477,7 +479,7 @@ def create_robust_anthropic_model():
 @cl.on_mcp_connect
 async def on_mcp_connect(connection, session: ClientSession):
     global session_memory_store  # 전역 변수 사용
-    
+
     try:
         tool_metadatas = await session.list_tools()
         mcp_tools = cl.user_session.get("mcp_tools", {})
@@ -565,9 +567,77 @@ async def setup_agent(settings):
     """설정 업데이트 시 에이전트 재설정"""
     pass
 
+
+# config.json에서 MCP 서버 설정 읽어오기
+def load_mcp_servers_from_config():
+        try:
+            with open("config.json", "r", encoding="utf-8") as f:
+                config = json.load(f)
+            
+            mcp_servers = []
+            for server_name, server_config in config.items():
+                command_parts = [server_config["command"]] + server_config.get("args", [])
+                full_command = " ".join(command_parts)
+                
+                mcp_servers.append({
+                    "name": server_name,
+                    "command": full_command
+                })
+            
+            return mcp_servers
+        except Exception as e:
+            print(f"[DEBUG] config.json 읽기 실패: {e}")
+            # 기본값으로 fallback
+            return [
+                {
+                    "name": "cortex_default_agent",  
+                    "command": "python cortex_agents_v2.py", 
+                },
+                {
+                    "name": "google-calendar",
+                    "command": "docker run --rm -i mcp/google-calendar",
+                }
+            ]
+
 @cl.on_chat_start
 async def on_chat_start():
-    """채팅 시작 시 초기화 및 사이드바 설정"""
+    """채팅 시작 시 초기화 및 서버 설정"""
+    mcp_servers = load_mcp_servers_from_config()
+
+    try:
+
+        print("[DEBUG] 직접 MCP 연결 시도...")
+        
+        # 방법 1: 각 서버에 대해 직접 연결
+        for i, server in enumerate(mcp_servers, 1):
+            try:
+                conn_request = cl_types.ConnectStdioMCPRequest(
+                    sessionId=cl.context.session.id,
+                    clientType="stdio", 
+                    name=server["name"],
+                    fullCommand=server["command"]
+                )
+                await cl_server.connect_mcp(conn_request, cl.context.session.user)
+                print(f"[DEBUG] MCP 서버 {i} ({server['name']}) 연결 성공")
+                
+                # 서버 간 연결 대기 시간 (선택사항)
+                if i < len(mcp_servers):
+                    await asyncio.sleep(0.5)  # 0.5초 대기
+                    
+            except Exception as server_error:
+                print(f"[DEBUG] MCP 서버 {i} ({server['name']}) 연결 실패: {server_error}")
+                continue  # 다음 서버 계속 시도
+            
+  
+    except Exception as mcp_error:
+        print(f"[DEBUG] MCP 연결 전체 실패: {mcp_error}")
+        # 기본 autoconnect로 fallback
+        try:
+            await cl.mcp.autoconnect()
+            print("[DEBUG] Fallback autoconnect 성공")
+        except Exception as fallback_error:
+            print(f"[DEBUG] Fallback autoconnect도 실패: {fallback_error}")
+
     # 현재 사용자 정보 가져오기
     user = cl.user_session.get("user")
     if not user:
