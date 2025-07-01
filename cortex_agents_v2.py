@@ -120,25 +120,25 @@ async def execute_sql(sql: str) -> Dict[str, Any]:
 
 
 async def call_cortex_agent(
-    query: str, 
-    use_analyst: bool = True, 
-    use_search: bool = True, 
+    query: str,
+    use_analyst: bool = True,
+    use_search: bool = True,
     max_search_results: int = 15,
     search_filters: Optional[Dict] = None,
     custom_instruction: Optional[str] = None
 ) -> Tuple[str, str, List[Dict]]:
     """
     통합된 Cortex Agent 호출 함수
-    
+
     Args:
         query: 사용자 질문
         use_analyst: Analyst 도구 사용 여부
-        use_search: Search 도구 사용 여부  
+        use_search: Search 도구 사용 여부
         max_search_results: 최대 검색 결과 수
         search_filters: 검색 필터
         custom_instruction: 커스텀 응답 지시사항
     """
-    
+
     # 기본 응답 지시사항
     if custom_instruction is None:
         if use_analyst and use_search:
@@ -164,27 +164,41 @@ async def call_cortex_agent(
     # 도구 구성
     tools = []
     tool_resources = {}
-    
+
     if use_analyst:
         tools.append({"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}})
         tool_resources["Analyst1"] = {"semantic_model_file": SEMANTIC_MODEL_FILE}
-    
+
     if use_search:
-        tools.append({"tool_spec": {"type": "cortex_search", "name": "Search1"}})
-        
+        tools.append({"tool_spec": {
+            "type": "cortex_search",
+            "name": "Business Search",
+            "description": "Search for business-related documents such as sales reports, performance records, financial data, and business analysis."}})
+        tools.append({"tool_spec": {
+            "type": "cortex_search",
+            "name": "HR Search",
+            "description": "Search for internal HR documents, including employee policies, benefits, organizational charts, and HR guidelines."}})
+
         # 기본 검색 필터
-        default_filters = {"@eq": {"language": "Korean"}}
+        default_filters = {} # {"@eq": {"language": "Korean"}}
         if search_filters:
             default_filters = search_filters
-            
-        tool_resources["Search1"] = {
-            "name": CORTEX_SEARCH_SERVICE,
+
+        tool_resources["Business Search"] = {
+            "name": 'CORTEX_ANALYST_DEMO.LLM_POC.DOCS_MEETING',
             "max_results": max_search_results,
             "title_column": "relative_path",
             "id_column": "doc_id",
             "filter": default_filters
         }
-    
+        tool_resources["HR Search"] = {
+            "name": 'CORTEX_ANALYST_DEMO.LLM_POC.HR_DOCS_MEETING',
+            "max_results": max_search_results,
+            "title_column": "relative_path",
+            "id_column": "doc_id",
+            "filter": default_filters
+        }
+
     if use_analyst:
         tools.append({"tool_spec": {"type": "sql_exec", "name": "sql_execution_tool"}})
 
@@ -226,27 +240,27 @@ def group_citations_by_document(citations: List[Dict]) -> Dict[str, Dict]:
         relative_path = citation.get("source_id", "")
         if not relative_path:
             continue
-            
+
         if relative_path not in documents_by_path:
             documents_by_path[relative_path] = {
                 "title": citation.get("title", ""),
                 "chunks": [],
                 "source": relative_path
             }
-            
+
         content = citation.get("content", "")
         if content:
             documents_by_path[relative_path]["chunks"].append(content)
-    
+
     return documents_by_path
 
 
 async def generate_styled_report(query: str, data_results: Dict, citations: List[Dict]) -> str:
     """문서 템플릿을 참고하여 스타일이 적용된 보고서 생성"""
-    
+
     # 문서별로 청크들을 그룹화
     documents_by_path = group_citations_by_document(citations)
-    
+
     # 각 문서의 전체 내용을 재구성하여 템플릿 스타일 분석
     document_styles = []
     for path, doc_info in documents_by_path.items():
@@ -257,14 +271,14 @@ async def generate_styled_report(query: str, data_results: Dict, citations: List
             "source": path,
             "chunk_count": len(doc_info["chunks"])
         })
-    
+
     # 보고서 생성을 위한 프롬프트 구성
     template_instruction = f"""
     다음 {len(document_styles)}개 문서들의 형태와 어투를 참고하여 데이터 분석 보고서를 작성해주세요:
-    
+
     참고 문서 스타일:
     """
-    
+
     for i, style in enumerate(document_styles):
         template_instruction += f"""
         문서 {i+1}: {style['title']} (청크 수: {style['chunk_count']})
@@ -272,14 +286,14 @@ async def generate_styled_report(query: str, data_results: Dict, citations: List
         출처: {style['source']}
         ---
         """
-    
+
     template_instruction += f"""
-    
+
     위 문서들의 형식, 어투, 구조를 참고하여 다음 데이터 분석 결과를 바탕으로 보고서를 작성해주세요:
-    
+
     사용자 질문: {query}
     데이터 분석 결과: {json.dumps(data_results, ensure_ascii=False, indent=2)}
-    
+
     보고서 작성 시 다음 사항을 고려해주세요:
     1. 참고 문서의 어투와 형식을 따라주세요
     2. 데이터에서 도출된 핵심 인사이트를 강조해주세요
@@ -287,7 +301,7 @@ async def generate_styled_report(query: str, data_results: Dict, citations: List
     4. 결론과 제언을 포함해주세요
     5. 각 문서에서 추출한 스타일 요소들을 종합적으로 반영해주세요
     """
-    
+
     # Cortex Complete API를 사용하여 보고서 생성
     payload = {
         "model": "claude-4-sonnet",
@@ -297,11 +311,11 @@ async def generate_styled_report(query: str, data_results: Dict, citations: List
         "max_tokens": 2000,
         "temperature": 0.7
     }
-    
+
     try:
         request_id = str(uuid.uuid4())
         url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/cortex/complete"
-        
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 url,
@@ -309,76 +323,101 @@ async def generate_styled_report(query: str, data_results: Dict, citations: List
                 headers=API_HEADERS,
                 params={"requestId": request_id},
             )
-        
+
         if response.status_code == 200:
             result = response.json()
             return result.get("choices", [{}])[0].get("message", {}).get("content", "보고서 생성에 실패했습니다.")
         else:
             return f"보고서 생성 API 오류: {response.status_code} {response.text}"
-    
+
     except Exception as e:
         logging.error("Report generation error: %s\n%s", e, traceback.format_exc())
         return f"보고서 생성 중 오류 발생: {e}"
 
 
 def detect_query_intent(query: str) -> str:
-    """사용자 질문의 의도를 파악"""
+    """사용자 질문의 의도를 파악 (DEBUG)"""
     query_lower = safe_string_convert(query).lower()
-    
+    logging.debug(f"[detect_query_intent] query_lower: {query_lower}")
+
     # 보고서 목록 요청 키워드들
     report_list_keywords = [
         "보고서목록", "보고서 목록", "사용가능한 보고서", "available reports",
         "문서목록", "문서 목록", "어떤 문서", "어떤 보고서", "뭐가 있어", "뭐가있어",
         "목록", "리스트", "list", "documents", "reports", "파일목록", "파일 목록"
     ]
-    
+
     if any(keyword in query_lower for keyword in report_list_keywords):
+        logging.debug("[detect_query_intent] Detected: report_list")
         return "report_list"
-    
-    # 데이터 분석 키워드들  
+
+    # 데이터 분석 키워드들
     analysis_keywords = [
         "분석", "조회", "데이터", "통계", "집계", "합계", "평균", "최대", "최소",
         "sql", "select", "where", "group by", "분석해줘", "보여줘"
     ]
-    
-    if any(keyword in query_lower for keyword in analysis_keywords):
-        return "data_analysis"
-    
+
     # 문서 검색 키워드들
     search_keywords = [
-        "찾아줘", "검색", "문서", "내용", "정보", "자료", "참고"
+        "찾아줘", "알려줘","검색", "문서", "내용", "정보", "자료", "참고", "방법", "규정"
     ]
-    
+
+    business_keywords = [
+        "매출", "영업", "실적", "성과", "비즈니스", "사업", "report", "business", "재무", "finance", "판매", "고객", "시장", "분기", "연간"
+    ]
+
+    # 사내 지식(HR) 관련 키워드
+    hr_keywords = [
+        "인사", "휴가", "복지", "채용", "인원", "연차", "근무", "급여", "인사제도", "hr", "인사팀", "조직도", "사내", "직원", "경조"
+    ]
+
+    if any(keyword in query_lower for keyword in analysis_keywords):
+        logging.debug("[detect_query_intent] Detected: data_analysis")
+        if not any(keyword in query_lower for keyword in hr_keywords):
+            return "data_analysis"
+
+
     if any(keyword in query_lower for keyword in search_keywords):
-        return "document_search"
-    
+        # 비즈니스 보고서 관련 키워드
+
+        if any(keyword in query_lower for keyword in business_keywords):
+            logging.debug("[detect_query_intent] Detected: business_search")
+            return "business_search"
+        elif any(keyword in query_lower for keyword in hr_keywords):
+            logging.debug("[detect_query_intent] Detected: hr_search")
+            return "hr_search"
+
+        logging.debug("[detect_query_intent] Detected: document_search")
+        return "document_search" # 통합 검색
+
     # 기본값은 통합 분석
+    logging.debug("[detect_query_intent] Detected: integrated_analysis (default)")
     return "integrated_analysis"
 
 
 @mcp.tool(description="Unified Cortex Agent that handles data analysis, document search, and report generation based on query intent.")
 async def cortex_unified_agent(
-    query: str, 
+    query: str,
     force_mode: Optional[str] = None,
     include_styled_report: bool = False,
     max_search_results: int = 15
 ) -> Dict[str, Any]:
     """
     통합된 Cortex Agent 도구 - 질문 의도에 따라 적절한 기능을 자동 선택
-    
+
     Args:
         query: 사용자 질문
         force_mode: 강제 모드 ("data_analysis", "document_search", "report_list", "integrated_analysis")
         include_styled_report: 스타일이 적용된 보고서 생성 여부
         max_search_results: 최대 검색 결과 수
-    
+
     Returns:
         dict: 통합된 분석 결과
     """
-    
+
     # 질문 의도 파악
     intent = force_mode if force_mode else detect_query_intent(query)
-    
+
     try:
         if intent == "report_list":
             # 보고서 목록 반환
@@ -388,7 +427,7 @@ async def cortex_unified_agent(
                 use_search=True,
                 max_search_results=50
             )
-            
+
             # 중복 제거된 문서 목록 생성
             unique_documents = {}
             for citation in citations:
@@ -401,7 +440,7 @@ async def cortex_unified_agent(
                         "doc_id": citation.get("doc_id", ""),
                         "sample_content": content[:200] if content else ""
                     }
-            
+
             # 문서 타입별 분류
             document_types = {}
             for path, doc_info in unique_documents.items():
@@ -409,15 +448,15 @@ async def cortex_unified_agent(
                     ext = path.split(".")[-1].split("_")[0]
                 else:
                     ext = "unknown"
-                
+
                 if ext not in document_types:
                     document_types[ext] = []
                 document_types[ext].append(doc_info)
-            
+
             # 사용자 친화적인 응답 생성
             if unique_documents:
                 response_text = f"📋 **사용 가능한 보고서 목록** (총 {len(unique_documents)}개)\n\n"
-                
+
                 for doc_type, docs in document_types.items():
                     response_text += f"**{doc_type.upper()} 파일 ({len(docs)}개):**\n"
                     for doc in docs:
@@ -425,11 +464,11 @@ async def cortex_unified_agent(
                         if doc['sample_content']:
                             response_text += f"  └ 내용 미리보기: {doc['sample_content']}...\n"
                     response_text += "\n"
-                
+
                 response_text += "위 보고서들을 활용하여 데이터 분석이나 문서 검색을 요청하실 수 있습니다."
             else:
                 response_text = "❌ 현재 사용 가능한 보고서를 찾을 수 없습니다."
-            
+
             return {
                 "intent": intent,
                 "response": response_text,
@@ -437,8 +476,9 @@ async def cortex_unified_agent(
                 "document_types": document_types,
                 "total_documents": len(unique_documents)
             }
-        
+
         elif intent == "data_analysis":
+            logging.debug("[cortex_unified_agent] data_analysis branch")
             # 데이터 분석 수행
             text, sql, citations = await call_cortex_agent(
                 query,
@@ -446,10 +486,10 @@ async def cortex_unified_agent(
                 use_search=False,
                 max_search_results=max_search_results
             )
-            
+
             # SQL 실행
             results = await execute_sql(sql) if sql else None
-            
+
             response_data = {
                 "intent": intent,
                 "response": text,
@@ -457,15 +497,22 @@ async def cortex_unified_agent(
                 "results": results,
                 "citations": citations
             }
-            
+
             # 스타일이 적용된 보고서 생성 (요청 시)
             if include_styled_report and citations:
                 styled_report = await generate_styled_report(query, results or {}, citations)
                 response_data["styled_report"] = styled_report
-            
+
+            logging.debug(f"[cortex_unified_agent] data_analysis response: {response_data}")
             return response_data
-        
-        elif intent == "document_search":
+
+        elif 'search' in intent :
+            logging.debug(f"[cortex_unified_agent] search branch: {intent}")
+            if intent == "hr_search":
+                search_name = "HR Search"
+            else:
+                search_name = "Business Search"
+
             # 문서 검색 수행
             text, sql, citations = await call_cortex_agent(
                 query,
@@ -473,14 +520,16 @@ async def cortex_unified_agent(
                 use_search=True,
                 max_search_results=max_search_results
             )
-            
+
+            logging.debug(f"[cortex_unified_agent] search response: text: {text[:200]}, citations: {len(citations)}")
             return {
                 "intent": intent,
                 "response": text,
                 "citations": citations,
                 "found_documents": len(citations)
             }
-        
+
+
         else:  # integrated_analysis
             # 통합 분석 (데이터 + 문서)
             text, sql, citations = await call_cortex_agent(
@@ -489,10 +538,10 @@ async def cortex_unified_agent(
                 use_search=True,
                 max_search_results=max_search_results
             )
-            
+
             # SQL 실행
             results = await execute_sql(sql) if sql else None
-            
+
             response_data = {
                 "intent": intent,
                 "response": text,
@@ -500,14 +549,14 @@ async def cortex_unified_agent(
                 "results": results,
                 "citations": citations
             }
-            
+
             # 스타일이 적용된 보고서 생성 (요청 시)
             if include_styled_report and citations:
                 styled_report = await generate_styled_report(query, results or {}, citations)
                 response_data["styled_report"] = styled_report
-            
+
             return response_data
-    
+
     except Exception as e:
         logging.error(f"Error in cortex_unified_agent: {e}")
         return {
@@ -524,23 +573,23 @@ async def generate_comprehensive_report(
 ) -> Dict[str, Any]:
     """
     포괄적인 분석 보고서 생성 (문서 템플릿 스타일 적용)
-    
+
     Args:
         query: 분석 질문
         template_documents: 템플릿으로 사용할 문서 경로 목록
-    
+
     Returns:
         dict: 포괄적인 분석 보고서
     """
-    
+
     # 1단계: 통합 분석 수행
     analysis_result = await cortex_unified_agent(
-        query, 
+        query,
         force_mode="integrated_analysis",
         include_styled_report=False,
         max_search_results=20
     )
-    
+
     # 2단계: 템플릿 문서 추가 검색 (지정된 경우)
     template_citations = []
     if template_documents:
@@ -561,18 +610,18 @@ async def generate_comprehensive_report(
                 template_citations.extend(citations)
             except Exception as e:
                 logging.warning(f"템플릿 문서 {doc_path} 검색 실패: {e}")
-    
+
     # 3단계: 스타일이 적용된 보고서 생성
     all_citations = analysis_result.get("citations", []) + template_citations
     styled_report = ""
-    
+
     if all_citations:
         styled_report = await generate_styled_report(
-            query, 
-            analysis_result.get("results", {}), 
+            query,
+            analysis_result.get("results", {}),
             all_citations
         )
-    
+
     return {
         "original_analysis": analysis_result,
         "styled_report": styled_report,

@@ -3,7 +3,7 @@
 # --- 1. 기본 라이브러리 임포트 ---
 import chainlit as cl
 import chainlit.types as cl_types
-import chainlit.server as cl_server 
+import chainlit.server as cl_server
 import json
 import pandas as pd
 import io
@@ -67,7 +67,7 @@ def init_database():
     """채팅 기록 저장용 데이터베이스 초기화"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     # 사용자 테이블
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -78,7 +78,7 @@ def init_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
+
     # 채팅 세션 테이블 (사용자 ID 추가)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -91,7 +91,7 @@ def init_database():
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     ''')
-    
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,7 +102,7 @@ def init_database():
             FOREIGN KEY (session_id) REFERENCES chat_sessions (id)
         )
     ''')
-    
+
     conn.commit()
     conn.close()
 
@@ -115,16 +115,16 @@ def create_user(email: str, password: str, display_name: str = None) -> bool:
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        
+
         user_id = hashlib.md5(email.encode()).hexdigest()
         password_hash = hash_password(password)
         display_name = display_name or email.split('@')[0]  # 이메일의 @ 앞부분을 기본 이름으로
-        
+
         cursor.execute('''
             INSERT INTO users (id, username, password_hash, display_name)
             VALUES (?, ?, ?, ?)
         ''', (user_id, email, password_hash, display_name))
-        
+
         conn.commit()
         conn.close()
         return True
@@ -135,18 +135,18 @@ def authenticate_user(email: str, password: str) -> Optional[Dict]:
     """사용자 인증"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     password_hash = hash_password(password)
-    
+
     cursor.execute('''
         SELECT id, username, display_name
         FROM users
         WHERE username = ? AND password_hash = ?
     ''', (email, password_hash))
-    
+
     user = cursor.fetchone()
     conn.close()
-    
+
     if user:
         return {
             "id": user[0],
@@ -159,12 +159,12 @@ def save_chat_session(session_id: str, user_id: str, title: str):
     """새로운 채팅 세션 저장"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     cursor.execute('''
         INSERT OR REPLACE INTO chat_sessions (id, user_id, title, updated_at)
         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
     ''', (session_id, user_id, title))
-    
+
     conn.commit()
     conn.close()
 
@@ -172,19 +172,19 @@ def save_message(session_id: str, role: str, content: str):
     """메시지 저장"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     cursor.execute('''
         INSERT INTO chat_messages (session_id, role, content)
         VALUES (?, ?, ?)
     ''', (session_id, role, content))
-    
+
     # 세션의 메시지 카운트 업데이트
     cursor.execute('''
-        UPDATE chat_sessions 
+        UPDATE chat_sessions
         SET message_count = message_count + 1, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
     ''', (session_id,))
-    
+
     conn.commit()
     conn.close()
 
@@ -192,7 +192,7 @@ def get_chat_sessions(user_id: str):
     """사용자의 모든 채팅 세션 목록 가져오기"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     cursor.execute('''
         SELECT id, title, created_at, message_count
         FROM chat_sessions
@@ -200,7 +200,7 @@ def get_chat_sessions(user_id: str):
         ORDER BY updated_at DESC
         LIMIT 20
     ''', (user_id,))
-    
+
     sessions = cursor.fetchall()
     conn.close()
     return sessions
@@ -209,14 +209,14 @@ def get_session_messages(session_id: str):
     """특정 세션의 메시지들 가져오기"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     cursor.execute('''
         SELECT role, content, timestamp
         FROM chat_messages
         WHERE session_id = ?
         ORDER BY timestamp ASC
     ''', (session_id,))
-    
+
     messages = cursor.fetchall()
     conn.close()
     return messages
@@ -232,7 +232,7 @@ def generate_session_title(first_message: str) -> str:
 # 🔧 에러 발생 시 대화 초기화 안내를 위한 유틸리티 함수들
 async def send_error_with_reset_guidance(error_message: str, error_type: str = "일반"):
     """에러 메시지와 함께 대화 초기화 안내를 보내는 함수"""
-    
+
     # 🎨 에러 타입별 맞춤 메시지
     if error_type == "네트워크":
         reset_guidance = """
@@ -270,7 +270,7 @@ async def send_error_with_reset_guidance(error_message: str, error_type: str = "
 
 💡 **지속적인 문제**: 계속 같은 오류가 발생하면 브라우저 캐시를 삭제해보세요.
 """
-    
+
     # 🚨 에러 메시지 + 안내사항 결합
     full_message = f"""⚠️ **오류 발생**: {error_message}
 
@@ -278,12 +278,12 @@ async def send_error_with_reset_guidance(error_message: str, error_type: str = "
 
 🔧 **빠른 해결**: 지금 바로 **Ctrl+F5** (Windows) 또는 **Cmd+R** (Mac)을 눌러 새로고침해보세요!
 """
-    
+
     await cl.Message(content=full_message).send()
 
 async def send_critical_error_guidance():
     """심각한 에러 발생 시 상세한 안내를 보내는 함수"""
-    
+
     critical_guidance = """
 🚨 **시스템 오류가 발생했습니다**
 
@@ -305,7 +305,7 @@ async def send_critical_error_guidance():
 ---
 *문제가 계속 발생하면 잠시 후 다시 시도해주세요. 시스템이 자동으로 복구됩니다.*
 """
-    
+
     await cl.Message(content=critical_guidance).send()
 
 
@@ -389,16 +389,16 @@ async def preprocess_with_silent_summary(input_data):
             recent_messages = chat_history[-2:]
 
             print(f"[DEBUG] 누적 요약 시작. 기존 요약:{'있음' if existing_summary else '없음'}, 요약 대상:{len(messages_to_summarize)}, 유지:{len(recent_messages)}")
-            
+
             # 기존 요약과 함께 새로운 요약 생성
             updated_summary_content = await create_intelligent_summary_silent(messages_to_summarize, existing_summary)
-            
+
             # 새로운 요약 메시지와 최신 대화로 메모리를 완전히 재구성
             summary_message = SystemMessage(content=f"--- 누적 요약 ---\n{updated_summary_content}")
             memory.chat_memory.messages = [summary_message] + recent_messages
-            
+
             print(f"[DEBUG] 메모리 재구성 완료. 현재 메모리: 요약 1개 + 최신 대화 {len(recent_messages)}개")
-            
+
             # LLM에는 현재 턴의 요약본과 최신 대화를 전달
             messages_for_llm = [summary_message] + recent_messages
 
@@ -407,7 +407,7 @@ async def preprocess_with_silent_summary(input_data):
             messages_for_llm = ([SystemMessage(content=existing_summary)] if existing_summary else []) + chat_history
 
         final_messages_to_agent = system_prompt_message + messages_for_llm + user_message
-        
+
         print(f"[DEBUG] 최종 전달 메시지 수: {len(final_messages_to_agent)}")
         return {"messages": final_messages_to_agent}
 
@@ -425,13 +425,13 @@ init_database()
 def auth_callback(username: str, password: str) -> Optional[cl.User]:
     """사용자 인증 콜백"""
     print(f"DEBUG: 로그인 시도 - 사용자명: {username}")
-    
+
     user_data = authenticate_user(username, password)
     print(f"DEBUG: 인증 결과: {user_data}")
-    
+
     if user_data:
         print(f"DEBUG: 로그인 성공 - {user_data['display_name']}")
-        
+
         # 🔧 Chainlit User 객체 생성 - 모든 방법 시도
         user = cl.User(
             identifier=user_data["username"],  # 이메일을 identifier로 사용
@@ -442,19 +442,19 @@ def auth_callback(username: str, password: str) -> Optional[cl.User]:
                 "db_id": user_data["id"]  # 백업용 ID
             }
         )
-        
+
         # display_name 속성 직접 설정 시도
         try:
             user.display_name = user_data["display_name"]
             print(f"DEBUG: display_name 직접 설정 완료: {user_data['display_name']}")
         except Exception as e:
             print(f"DEBUG: display_name 설정 실패: {e}")
-        
+
         print(f"DEBUG: 최종 생성된 User 객체:")
         print(f"  - identifier: {user.identifier}")
         print(f"  - display_name: {getattr(user, 'display_name', 'None')}")
         print(f"  - metadata: {user.metadata}")
-        
+
         return user
     else:
         print(f"DEBUG: 로그인 실패 - 사용자명 또는 비밀번호 불일치")
@@ -463,7 +463,7 @@ def auth_callback(username: str, password: str) -> Optional[cl.User]:
 
 def create_robust_anthropic_model():
     """네트워크 안정성을 위한 강화된 Anthropic 모델 생성"""
-    
+
     model = ChatAnthropic(
         model="claude-sonnet-4-20250514",
         temperature=0.1,
@@ -488,7 +488,7 @@ async def on_mcp_connect(connection, session: ClientSession):
             for t in tool_metadatas.tools
         ]
         cl.user_session.set("mcp_tools", mcp_tools)
-        
+
         model = cl.user_session.get("model")
         if not model:
             model = create_robust_anthropic_model()
@@ -500,79 +500,7 @@ async def on_mcp_connect(connection, session: ClientSession):
             for tool_info in tools:
                 async def tool_func(tool_input: Any, conn_name=conn_name, tool_name=tool_info['name'], tool_schema=tool_info['input_schema']):
                     mcp_session, _ = cl.context.session.mcp_sessions.get(conn_name)
-                    if not mcp_session: 
-                        return f"Error: MCP session for '{conn_name}' not found."
-                    
-                    # 🔧 입력 데이터 정리 및 파라미터명 자동 결정
-                    def clean_tool_input(raw_input):
-                        """입력 데이터를 정리하는 함수"""
-                        if isinstance(raw_input, str):
-                            # 중첩된 이스케이프 문자 정리
-                            cleaned = raw_input.replace('\\\\n', '\\n').replace('\\\\"', '\\"')
-                            
-                            # JSON 형태의 문자열인지 확인 후 파싱 시도
-                            if cleaned.strip().startswith('{') and cleaned.strip().endswith('}'):
-                                try:
-                                    import json
-                                    parsed = json.loads(cleaned)
-                                    return parsed
-                                except json.JSONDecodeError:
-                                    # JSON 파싱 실패시 원본 문자열 반환
-                                    return cleaned
-                            return cleaned
-                        return raw_input
-                    
-                    def match_input_to_schema(input_data, schema):
-                        """입력 데이터를 스키마에 맞게 자동 매핑"""
-                        if not isinstance(schema, dict) or "properties" not in schema:
-                            return input_data
-                            
-                        properties = schema.get("properties", {})
-                        required_fields = schema.get("required", [])
-                        
-                        # 입력이 dict이고 스키마의 properties와 일치하는 키들을 포함하고 있다면
-                        if isinstance(input_data, dict):
-                            # 입력의 키들이 스키마의 properties에 포함되는지 확인
-                            input_keys = set(input_data.keys())
-                            schema_keys = set(properties.keys())
-                            
-                            # 모든 required 필드가 있거나, 입력 키들이 스키마 키들의 부분집합이라면
-                            if (all(field in input_data for field in required_fields) or 
-                                input_keys.issubset(schema_keys)):
-                                # 이미 올바른 구조
-                                print(f"[DEBUG] 올바른 구조 감지: {list(input_data.keys())}")
-                                return input_data
-                            elif len(input_data) == 1:
-                                # 단일 키를 가진 dict라면, 값이 실제 스키마 구조인지 확인
-                                single_key, single_value = list(input_data.items())[0]
-                                if isinstance(single_value, dict):
-                                    value_keys = set(single_value.keys())
-                                    # 값의 키들이 스키마와 더 잘 맞는다면 값을 사용
-                                    if value_keys.issubset(schema_keys) and len(value_keys) > 0:
-                                        print(f"[DEBUG] 중첩 구조 해제: {single_key} -> {list(single_value.keys())}")
-                                        return single_value
-                        
-                        # 단일 파라미터 도구인지 확인
-                        if len(properties) == 1:
-                            param_name = list(properties.keys())[0]
-                            print(f"[DEBUG] 단일 파라미터 도구: {param_name}")
-                            return {param_name: input_data}
-                        
-                        # 복수 파라미터 도구인데 입력이 dict가 아니라면
-                        if len(required_fields) > 0:
-                            # 첫 번째 required 필드에 전체 입력을 할당
-                            param_name = required_fields[0]
-                            print(f"[DEBUG] 첫 번째 required 필드 사용: {param_name}")
-                            return {param_name: input_data}
-                        elif len(properties) > 0:
-                            # required가 없다면 첫 번째 property에 할당
-                            first_prop = list(properties.keys())[0]
-                            print(f"[DEBUG] 첫 번째 property 사용: {first_prop}")
-                            return {first_prop: input_data}
-                        
-                        # 기본값
-                        print(f"[DEBUG] 기본값 사용: input")
-                        return {"input": input_data}
+                    if not mcp_session: return f"Error: MCP session for '{conn_name}' not found."
                     
                     if not isinstance(tool_input, dict):
                         # 입력 데이터 정리
@@ -615,7 +543,7 @@ async def on_mcp_connect(connection, session: ClientSession):
                 )
                 session_memory_store[session_id] = new_memory
             return session_memory_store[session_id]
-        
+
         memory = get_session_history(cl.context.session.id)
         cl.user_session.set("memory", memory)
         cl.user_session.set("session_memory_store", session_memory_store)
@@ -630,23 +558,24 @@ async def on_mcp_connect(connection, session: ClientSession):
 
         # 🔧 순수 agent 저장 (RunnableLambda 체인 없음)
         cl.user_session.set("agent", agent_core)
-        
+        await cl.Message(content=f"MCP 연결 '{connection.name}'이(가) 연결되었습니다.").send()
+
         print("[DEBUG] MCP 연결 완료 - 순수 agent 설정됨")
 
     except Exception as e:
         error_msg = f"MCP 연결 처리 중 오류가 발생했습니다: {e}"
         print(error_msg)
         traceback.print_exc()
-        
+
         # MCP 연결 실패 시 안내
         await send_error_with_reset_guidance(
-            "도구 연결에 실패했습니다. 일부 기능이 제한될 수 있습니다.", 
+            "도구 연결에 실패했습니다. 일부 기능이 제한될 수 있습니다.",
             "일반"
         )
 
 @cl.on_mcp_disconnect
 async def on_mcp_disconnect(connection):
-    await cl.Message(content=f"MCP 연결 '{connection.name}'이(가) 종료되었습니다.").send()
+    await cl.Message(content=f"MCP 연결 '{connection}'이(가) 종료되었습니다.").send()
 
 # --- 7. Chainlit 메시지 핸들러 ---
 @cl.on_settings_update
@@ -660,25 +589,25 @@ def load_mcp_servers_from_config():
         try:
             with open("config.json", "r", encoding="utf-8") as f:
                 config = json.load(f)
-            
+
             mcp_servers = []
             for server_name, server_config in config.items():
                 command_parts = [server_config["command"]] + server_config.get("args", [])
                 full_command = " ".join(command_parts)
-                
+
                 mcp_servers.append({
                     "name": server_name,
                     "command": full_command
                 })
-            
+
             return mcp_servers
         except Exception as e:
             print(f"[DEBUG] config.json 읽기 실패: {e}")
             # 기본값으로 fallback
             return [
                 {
-                    "name": "cortex_default_agent",  
-                    "command": "python cortex_agents_v2.py", 
+                    "name": "cortex_default_agent",
+                    "command": "python cortex_agents_v2.py",
                 },
                 {
                     "name": "google-calendar",
@@ -698,28 +627,28 @@ async def on_chat_start():
     try:
 
         print("[DEBUG] 직접 MCP 연결 시도...")
-        
+
         # 방법 1: 각 서버에 대해 직접 연결
         for i, server in enumerate(mcp_servers, 1):
             try:
                 conn_request = cl_types.ConnectStdioMCPRequest(
                     sessionId=cl.context.session.id,
-                    clientType="stdio", 
+                    clientType="stdio",
                     name=server["name"],
                     fullCommand=server["command"]
                 )
                 await cl_server.connect_mcp(conn_request, cl.context.session.user)
                 print(f"[DEBUG] MCP 서버 {i} ({server['name']}) 연결 성공")
-                
+
                 # 서버 간 연결 대기 시간 (선택사항)
                 if i < len(mcp_servers):
                     await asyncio.sleep(0.5)  # 0.5초 대기
-                    
+
             except Exception as server_error:
                 print(f"[DEBUG] MCP 서버 {i} ({server['name']}) 연결 실패: {server_error}")
                 continue  # 다음 서버 계속 시도
-            
-  
+
+
     except Exception as mcp_error:
         print(f"[DEBUG] MCP 연결 전체 실패: {mcp_error}")
         # 기본 autoconnect로 fallback
@@ -734,25 +663,25 @@ async def on_chat_start():
     if not user:
         user = cl.context.session.user
         cl.user_session.set("user", user)
-    
+
     if not user:
         await cl.Message(content="로그인이 필요합니다. 다시 로그인해주세요.").send()
         return
-    
+
     cl.user_session.set("mcp_tools", {})
     cl.user_session.set("message_count", 0)
-    
+
     # 환영 메시지 - 표시명 우선, 없으면 사용자명, 없으면 기본값
     display_name = user.metadata.get("display_name") or user.metadata.get("username") or "사용자"
-    
+
     # 🔧 사용자 정보 업데이트 시도
     try:
         # Chainlit에서 사용자 표시명을 강제로 설정
         user.display_name = display_name
-        
+
     except Exception as e:
         print(f"DEBUG: 사용자 표시명 설정 실패: {e}")
-    
+
     await cl.Message(content=f"안녕하세요 {display_name}님! NOA 입니다. 무엇이든 물어보세요 😊").send()
 
 @retry(
@@ -789,15 +718,15 @@ async def on_chat_end():
     user = cl.user_session.get("user") or cl.context.session.user
     if not user:
         return
-        
+
     session_id = cl.context.session.id
     message_count = cl.user_session.get("message_count", 0)
-    
+
     if message_count > 0:
         # 첫 번째 메시지를 기반으로 제목 생성
         first_message = cl.user_session.get("first_message", "새로운 대화")
         title = generate_session_title(first_message)
-        
+
         # 실제 user_id 사용 (메타데이터에서 가져옴)
         actual_user_id = user.metadata.get("user_id", user.identifier)
         save_chat_session(session_id, actual_user_id, title)
@@ -806,35 +735,35 @@ async def on_chat_end():
 async def on_message(message: cl.Message):
     """사용자 메시지 처리 - 메모리 저장 순서 수정"""
     global session_memory_store
-    
+
     # 현재 사용자 확인
     user = cl.user_session.get("user") or cl.context.session.user
     if not user:
         await send_error_with_reset_guidance(
-            "로그인이 필요합니다. 다시 로그인해주세요.", 
+            "로그인이 필요합니다. 다시 로그인해주세요.",
             "일반"
         )
         return
-    
+
     # 메시지 카운트 및 첫 메시지 저장
     message_count = cl.user_session.get("message_count", 0)
     message_count += 1
     cl.user_session.set("message_count", message_count)
-    
+
     if message_count == 1:
         cl.user_session.set("first_message", message.content)
-    
+
     # 메시지 DB에 저장
     session_id = cl.context.session.id
     try:
         save_message(session_id, "user", message.content)
     except Exception as db_error:
         print(f"[DEBUG] DB 저장 실패: {db_error}")
-    
+
     agent = cl.user_session.get("agent")
     if not agent:
         await send_error_with_reset_guidance(
-            "에이전트가 아직 설정되지 않았습니다. MCP 서버 연결을 확인해주세요.", 
+            "에이전트가 아직 설정되지 않았습니다. MCP 서버 연결을 확인해주세요.",
             "일반"
         )
         return
@@ -842,7 +771,7 @@ async def on_message(message: cl.Message):
     # 🔧 1. 먼저 요약을 전처리에서 조용히 처리
     input_data = {"messages": [HumanMessage(content=message.content)]}
     processed_input = await preprocess_with_silent_summary(input_data)
-    
+
     # 🔧 2. 처리된 메시지로 agent 실행
     config = RunnableConfig(
         recursion_limit=100,
@@ -854,10 +783,10 @@ async def on_message(message: cl.Message):
     has_streamed_content = False
     all_final_responses = []
     table_elements = None
-    
+
     max_network_retries = 3
     network_retry_count = 0
-    
+
     while network_retry_count < max_network_retries:
         try:
             # 🔧 전처리된 메시지로 agent 실행 (전체 메시지 배열 전달)
@@ -872,7 +801,7 @@ async def on_message(message: cl.Message):
 
                 elif kind == "on_llm_stream" or kind == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
-                    
+
                     chunk_content = ""
                     if isinstance(chunk.content, str):
                         chunk_content = chunk.content
@@ -880,7 +809,7 @@ async def on_message(message: cl.Message):
                         for part in chunk.content:
                             if isinstance(part, dict) and part.get("type") == "text":
                                 chunk_content += part.get("text", "")
-                    
+
                     if chunk_content and chunk_content.strip():
                         await final_msg.stream_token(chunk_content)
                         has_streamed_content = True
@@ -948,22 +877,22 @@ async def on_message(message: cl.Message):
                                         final_answer += part.get("text", "")
                             elif isinstance(output.content, str):
                                 final_answer = output.content
-                        
+
                         if final_answer.strip():
                             all_final_responses.append(final_answer)
-            
+
             # 성공하면 루프 종료
             break
-            
+
         except (HttpxReadError, HttpcoreReadError, ConnectionError) as network_error:
             network_retry_count += 1
             print(f"[DEBUG] 네트워크 에러 발생 ({network_retry_count}/{max_network_retries}): {network_error}")
-            
+
             if network_retry_count < max_network_retries:
                 # 재시도 전 대기
                 wait_time = 2 ** network_retry_count  # 지수 백오프
                 await asyncio.sleep(wait_time)
-                
+
                 # 사용자에게 재시도 알림
                 await cl.Message(
                     content=f"🔄 네트워크 연결이 불안정합니다. 재시도 중... ({network_retry_count}/{max_network_retries})"
@@ -972,45 +901,45 @@ async def on_message(message: cl.Message):
             else:
                 # 최대 재시도 횟수 초과 - 네트워크 에러 안내
                 await send_error_with_reset_guidance(
-                    "네트워크 연결이 불안정하여 응답을 완료할 수 없습니다.", 
+                    "네트워크 연결이 불안정하여 응답을 완료할 수 없습니다.",
                     "네트워크"
                 )
                 return
-                
+
         except anthropic.APIStatusError as e:
             if getattr(e, 'error', {}).get('type') == 'overloaded_error':
                 await send_error_with_reset_guidance(
-                    "Anthropic 서버가 과부하 상태입니다.", 
+                    "Anthropic 서버가 과부하 상태입니다.",
                     "API"
                 )
                 return
             else:
                 await send_error_with_reset_guidance(
-                    f"API 오류가 발생했습니다: {str(e)}", 
+                    f"API 오류가 발생했습니다: {str(e)}",
                     "API"
                 )
                 return
-                
+
         except MemoryError as memory_error:
             print(f"[DEBUG] 메모리 에러: {memory_error}")
             await send_error_with_reset_guidance(
-                "메모리 부족으로 처리할 수 없습니다.", 
+                "메모리 부족으로 처리할 수 없습니다.",
                 "메모리"
             )
             return
-            
+
         except RecursionError as recursion_error:
             print(f"[DEBUG] 재귀 에러: {recursion_error}")
             await send_error_with_reset_guidance(
-                "처리 과정이 너무 복잡해졌습니다.", 
+                "처리 과정이 너무 복잡해졌습니다.",
                 "메모리"
             )
             return
-            
+
         except Exception as e:
             print(f"[DEBUG] 예상치 못한 오류: {e}")
             traceback.print_exc()
-            
+
             # 🚨 알 수 없는 오류에 대한 상세 안내
             await send_critical_error_guidance()
             return
@@ -1030,13 +959,13 @@ async def on_message(message: cl.Message):
         await cl.Message(content=final_response, author="Assistant").send()
     elif not has_streamed_content and not all_final_responses:
         await send_error_with_reset_guidance(
-            "응답을 생성하는 데 문제가 발생했습니다.", 
+            "응답을 생성하는 데 문제가 발생했습니다.",
             "일반"
         )
         return
     else:
         final_response = final_msg.content
-        
+
         if not final_response.strip() and all_final_responses:
             additional_content = "\n\n".join(all_final_responses)
             await final_msg.stream_token(additional_content)
@@ -1046,14 +975,14 @@ async def on_message(message: cl.Message):
     if final_response and final_response.strip():
         clean_input = message.content.strip()
         clean_output = final_response.strip()
-        
+
         try:
             save_message(session_id, "assistant", clean_output)
-            
+
             # 🔧 메모리에 현재 대화 즉시 저장
             if session_id in session_memory_store:
                 actual_memory = session_memory_store[session_id]
-                
+
                 try:
                     if clean_input and clean_output:
                         # 🔧 현재 대화를 메모리에 저장
@@ -1062,12 +991,12 @@ async def on_message(message: cl.Message):
                             {"output": clean_output}
                         )
                         print(f"[DEBUG] 현재 대화 메모리 저장 완료: Q={clean_input[:30]}, A={clean_output[:30]}")
-                        
+
                         # 🔧 메모리 상태 확인
                         updated_vars = actual_memory.load_memory_variables({})
                         updated_history = updated_vars.get("chat_history", [])
                         print(f"[DEBUG] 업데이트된 메모리 크기: {len(updated_history)}개 메시지")
-                        
+
                 except Exception as save_error:
                     print(f"[DEBUG] 메모리 저장 실패: {save_error}")
                     # 🔧 대안 방법으로 직접 메모리에 추가
@@ -1107,7 +1036,7 @@ class AsyncConversationBufferMemory:
         chat_history = variables.get("chat_history", [])
         # 리스트 형태로 반환 (ConversationBufferMemory는 항상 리스트)
         return chat_history if isinstance(chat_history, list) else []
-    
+
     async def aadd_messages(self, messages, *args, **kwargs):
         # 동기 메서드를 비동기로 감싸서 호출
         print(f"[DEBUG][aadd_messages] called with {len(messages)} messages")
