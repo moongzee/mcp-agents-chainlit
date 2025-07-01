@@ -15,5 +15,15 @@
         "cortex_agents_v2.py"
       ],
       "transport": "stdio"
+    },
+    "crawl-server" :{
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "mcp/firecrawl"
+      ],
+      "transport": "stdio"
     }
   }
