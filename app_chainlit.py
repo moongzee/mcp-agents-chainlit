@@ -478,7 +478,7 @@ def create_robust_anthropic_model():
 # --- 6. MCP 연결 핸들러 정의 ---
 @cl.on_mcp_connect
 async def on_mcp_connect(connection, session: ClientSession):
-    global session_memory_store  # 전역 변수 사용
+    global session_memory_store
 
     try:
         tool_metadatas = await session.list_tools()
@@ -498,17 +498,104 @@ async def on_mcp_connect(connection, session: ClientSession):
         all_langchain_tools = []
         for conn_name, tools in mcp_tools.items():
             for tool_info in tools:
-                async def tool_func(tool_input: Any, conn_name=conn_name, tool_name=tool_info['name']):
+                async def tool_func(tool_input: Any, conn_name=conn_name, tool_name=tool_info['name'], tool_schema=tool_info['input_schema']):
                     mcp_session, _ = cl.context.session.mcp_sessions.get(conn_name)
-                    if not mcp_session: return f"Error: MCP session for '{conn_name}' not found."
+                    if not mcp_session: 
+                        return f"Error: MCP session for '{conn_name}' not found."
+                    
+                    # 🔧 입력 데이터 정리 및 파라미터명 자동 결정
+                    def clean_tool_input(raw_input):
+                        """입력 데이터를 정리하는 함수"""
+                        if isinstance(raw_input, str):
+                            # 중첩된 이스케이프 문자 정리
+                            cleaned = raw_input.replace('\\\\n', '\\n').replace('\\\\"', '\\"')
+                            
+                            # JSON 형태의 문자열인지 확인 후 파싱 시도
+                            if cleaned.strip().startswith('{') and cleaned.strip().endswith('}'):
+                                try:
+                                    import json
+                                    parsed = json.loads(cleaned)
+                                    return parsed
+                                except json.JSONDecodeError:
+                                    # JSON 파싱 실패시 원본 문자열 반환
+                                    return cleaned
+                            return cleaned
+                        return raw_input
+                    
+                    def match_input_to_schema(input_data, schema):
+                        """입력 데이터를 스키마에 맞게 자동 매핑"""
+                        if not isinstance(schema, dict) or "properties" not in schema:
+                            return input_data
+                            
+                        properties = schema.get("properties", {})
+                        required_fields = schema.get("required", [])
+                        
+                        # 입력이 dict이고 스키마의 properties와 일치하는 키들을 포함하고 있다면
+                        if isinstance(input_data, dict):
+                            # 입력의 키들이 스키마의 properties에 포함되는지 확인
+                            input_keys = set(input_data.keys())
+                            schema_keys = set(properties.keys())
+                            
+                            # 모든 required 필드가 있거나, 입력 키들이 스키마 키들의 부분집합이라면
+                            if (all(field in input_data for field in required_fields) or 
+                                input_keys.issubset(schema_keys)):
+                                # 이미 올바른 구조
+                                print(f"[DEBUG] 올바른 구조 감지: {list(input_data.keys())}")
+                                return input_data
+                            elif len(input_data) == 1:
+                                # 단일 키를 가진 dict라면, 값이 실제 스키마 구조인지 확인
+                                single_key, single_value = list(input_data.items())[0]
+                                if isinstance(single_value, dict):
+                                    value_keys = set(single_value.keys())
+                                    # 값의 키들이 스키마와 더 잘 맞는다면 값을 사용
+                                    if value_keys.issubset(schema_keys) and len(value_keys) > 0:
+                                        print(f"[DEBUG] 중첩 구조 해제: {single_key} -> {list(single_value.keys())}")
+                                        return single_value
+                        
+                        # 단일 파라미터 도구인지 확인
+                        if len(properties) == 1:
+                            param_name = list(properties.keys())[0]
+                            print(f"[DEBUG] 단일 파라미터 도구: {param_name}")
+                            return {param_name: input_data}
+                        
+                        # 복수 파라미터 도구인데 입력이 dict가 아니라면
+                        if len(required_fields) > 0:
+                            # 첫 번째 required 필드에 전체 입력을 할당
+                            param_name = required_fields[0]
+                            print(f"[DEBUG] 첫 번째 required 필드 사용: {param_name}")
+                            return {param_name: input_data}
+                        elif len(properties) > 0:
+                            # required가 없다면 첫 번째 property에 할당
+                            first_prop = list(properties.keys())[0]
+                            print(f"[DEBUG] 첫 번째 property 사용: {first_prop}")
+                            return {first_prop: input_data}
+                        
+                        # 기본값
+                        print(f"[DEBUG] 기본값 사용: input")
+                        return {"input": input_data}
                     
                     if not isinstance(tool_input, dict):
-                        tool_input = {"query": tool_input}
+                        # 입력 데이터 정리
+                        cleaned_input = clean_tool_input(tool_input)
+                        
+                        # 스키마에 맞게 자동 매핑
+                        tool_input = match_input_to_schema(cleaned_input, tool_schema)
+                        
+                        print(f"[DEBUG] {tool_name} 도구: 자동 매핑 완료 - 키: {list(tool_input.keys())}")
+                    else:
+                        # dict인 경우에도 스키마에 맞게 재매핑
+                        cleaned_dict = {k: clean_tool_input(v) for k, v in tool_input.items()}
+                        tool_input = match_input_to_schema(cleaned_dict, tool_schema)
+                        
+                        print(f"[DEBUG] {tool_name} 도구: dict 재매핑 완료 - 키: {list(tool_input.keys())}")
 
                     try:
+                        print(f"[DEBUG] {tool_name} 호출 - 입력: {str(tool_input)[:200]}...")
                         tool_result = await mcp_session.call_tool(tool_name, tool_input)
                         return str(tool_result)
-                    except Exception as e: return f"Error calling tool {tool_name}: {e}"
+                    except Exception as e: 
+                        print(f"[DEBUG] {tool_name} 호출 실패: {e}")
+                        return f"Error calling tool {tool_name}: {e}"
 
                 all_langchain_tools.append(
                     Tool(
