@@ -597,6 +597,10 @@ def load_mcp_servers_from_config():
                 {
                     "name": "google-calendar",
                     "command": "docker run --rm -i mcp/google-calendar",
+                },
+                {
+                    "name": "firecrawl-mcp-server",
+                    "command": "docker run --rm -i mcp/firecrawl",
                 }
             ]
 
