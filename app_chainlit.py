@@ -499,7 +499,7 @@ async def on_mcp_connect(connection, session: ClientSession):
         for conn_name, tools in mcp_tools.items():
             for tool_info in tools:
                 async def tool_func(tool_input: Any, conn_name=conn_name, tool_name=tool_info['name']):
-                    mcp_session = cl.context.session.mcp_sessions.get(conn_name)
+                    mcp_session, _ = cl.context.session.mcp_sessions.get(conn_name)
                     if not mcp_session: return f"Error: MCP session for '{conn_name}' not found."
                     
                     if not isinstance(tool_input, dict):
