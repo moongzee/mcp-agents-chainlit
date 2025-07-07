@@ -478,7 +478,7 @@ def create_robust_anthropic_model():
 # --- 6. MCP 연결 핸들러 정의 ---
 @cl.on_mcp_connect
 async def on_mcp_connect(connection, session: ClientSession):
-    global session_memory_store
+    global session_memory_store  # 전역 변수 사용
 
     try:
         tool_metadatas = await session.list_tools()
@@ -498,32 +498,17 @@ async def on_mcp_connect(connection, session: ClientSession):
         all_langchain_tools = []
         for conn_name, tools in mcp_tools.items():
             for tool_info in tools:
-                async def tool_func(tool_input: Any, conn_name=conn_name, tool_name=tool_info['name'], tool_schema=tool_info['input_schema']):
+                async def tool_func(tool_input: Any, conn_name=conn_name, tool_name=tool_info['name']):
                     mcp_session, _ = cl.context.session.mcp_sessions.get(conn_name)
                     if not mcp_session: return f"Error: MCP session for '{conn_name}' not found."
-                    
+
                     if not isinstance(tool_input, dict):
-                        # 입력 데이터 정리
-                        cleaned_input = clean_tool_input(tool_input)
-                        
-                        # 스키마에 맞게 자동 매핑
-                        tool_input = match_input_to_schema(cleaned_input, tool_schema)
-                        
-                        print(f"[DEBUG] {tool_name} 도구: 자동 매핑 완료 - 키: {list(tool_input.keys())}")
-                    else:
-                        # dict인 경우에도 스키마에 맞게 재매핑
-                        cleaned_dict = {k: clean_tool_input(v) for k, v in tool_input.items()}
-                        tool_input = match_input_to_schema(cleaned_dict, tool_schema)
-                        
-                        print(f"[DEBUG] {tool_name} 도구: dict 재매핑 완료 - 키: {list(tool_input.keys())}")
+                        tool_input = {"query": tool_input}
 
                     try:
-                        print(f"[DEBUG] {tool_name} 호출 - 입력: {str(tool_input)[:200]}...")
                         tool_result = await mcp_session.call_tool(tool_name, tool_input)
                         return str(tool_result)
-                    except Exception as e: 
-                        print(f"[DEBUG] {tool_name} 호출 실패: {e}")
-                        return f"Error calling tool {tool_name}: {e}"
+                    except Exception as e: return f"Error calling tool {tool_name}: {e}"
 
                 all_langchain_tools.append(
                     Tool(
@@ -558,7 +543,6 @@ async def on_mcp_connect(connection, session: ClientSession):
 
         # 🔧 순수 agent 저장 (RunnableLambda 체인 없음)
         cl.user_session.set("agent", agent_core)
-        await cl.Message(content=f"MCP 연결 '{connection.name}'이(가) 연결되었습니다.").send()
 
         print("[DEBUG] MCP 연결 완료 - 순수 agent 설정됨")
 
@@ -604,20 +588,7 @@ def load_mcp_servers_from_config():
         except Exception as e:
             print(f"[DEBUG] config.json 읽기 실패: {e}")
             # 기본값으로 fallback
-            return [
-                {
-                    "name": "cortex_default_agent",
-                    "command": "python cortex_agents_v2.py",
-                },
-                {
-                    "name": "google-calendar",
-                    "command": "docker run --rm -i mcp/google-calendar",
-                },
-                {
-                    "name": "firecrawl-mcp-server",
-                    "command": "docker run --rm -i mcp/firecrawl",
-                }
-            ]
+            return []
 
 @cl.on_chat_start
 async def on_chat_start():
