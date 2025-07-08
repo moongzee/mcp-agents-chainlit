@@ -29,6 +29,7 @@ SEMANTIC_MODEL_FILE = os.getenv("SEMANTIC_MODEL_FILE", default="@CORTEX_ANALYST_
 CORTEX_SEARCH_SERVICE = os.getenv("CORTEX_SEARCH_SERVICE", default="CORTEX_ANALYST_DEMO.LLM_POC.DOCS_MEETING")
 SNOWFLAKE_ACCOUNT_URL = os.getenv("SNOWFLAKE_ACCOUNT_URL", default="https://a1041574869271-eland-partner.snowflakecomputing.com")
 SNOWFLAKE_PAT = os.getenv("SNOWFLAKE_PAT", default="yJraWQiOiIyMTA0NTc2OTI3OTg5ODIiLCJhbGciOiJFUzI1NiJ9.eyJwIjoiMTI1NDQyNjA6MzIxMTMzMDA1MyIsImlzcyI6IlNGOjEwMzIiLCJleHAiOjE3ODE4MzA2NDZ9.zIsLtQrtoIp_WYZJyv_bU6U_KQ8Vr0T8MICvAjpgOb0wilLCwPcSAvH4wKzE4OGg8lFdEN7tR1X7KmfE56XxKg")
+SEMANTIC_MODEL_PATH = os.getenv("SEMANTIC_MODEL_PATH", default="@CORTEX_ANALYST_DEMO.LLM_POC.CORTEX_STAGE/")
 
 if not SNOWFLAKE_PAT:
     raise RuntimeError("Set SNOWFLAKE_PAT environment variable")
@@ -125,7 +126,8 @@ async def call_cortex_agent(
     use_search: bool = True,
     max_search_results: int = 15,
     search_filters: Optional[Dict] = None,
-    custom_instruction: Optional[str] = None
+    custom_instruction: Optional[str] = None,
+    tag: Optional[str] = None
 ) -> Tuple[str, str, List[Dict]]:
     """
     통합된 Cortex Agent 호출 함수
@@ -137,6 +139,7 @@ async def call_cortex_agent(
         max_search_results: 최대 검색 결과 수
         search_filters: 검색 필터
         custom_instruction: 커스텀 응답 지시사항
+        tag: 태그
     """
 
     # 기본 응답 지시사항
@@ -145,7 +148,7 @@ async def call_cortex_agent(
             response_instruction = (
                 "You are a helpful data analytics agent. "
                 "1. Use the Analyst1 tool to convert user questions into SQL when data analysis is needed. "
-                "2. Use the Search1 tool to find relevant documents when document search is needed. "
+                "2. Use the Search tool to find relevant documents when document search is needed. "
                 "3. Combine results appropriately and provide structured answers."
             )
         elif use_analyst:
@@ -166,8 +169,12 @@ async def call_cortex_agent(
     tool_resources = {}
 
     if use_analyst:
-        tools.append({"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}})
-        tool_resources["Analyst1"] = {"semantic_model_file": SEMANTIC_MODEL_FILE}
+        if tag == "crawling_analysis":
+            tools.append({"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}})
+            tool_resources["Analyst1"] = {"semantic_model_file": SEMANTIC_MODEL_PATH + 'fashion_keyword.yaml'}
+        else:
+            tools.append({"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}})
+            tool_resources["Analyst1"] = {"semantic_model_file": SEMANTIC_MODEL_FILE}
 
     if use_search:
         tools.append({"tool_spec": {
@@ -351,10 +358,16 @@ def detect_query_intent(query: str) -> str:
         logging.debug("[detect_query_intent] Detected: report_list")
         return "report_list"
 
+
     # 데이터 분석 키워드들
     analysis_keywords = [
         "분석", "조회", "데이터", "통계", "집계", "합계", "평균", "최대", "최소",
         "sql", "select", "where", "group by", "분석해줘", "보여줘"
+    ]
+
+    # 경쟁사 및 자사 키워드 = ["경쟁사", "자사", "회사", "회사 정보", "회사 정보 조회", "회사 정보 조회해줘", "회사 정보 조회해줘"]
+    crawling_keywords = [
+        "경쟁사", "크롤링", "트렌드", "리뷰", "가격", "무신사"
     ]
 
     # 문서 검색 키워드들
@@ -374,7 +387,10 @@ def detect_query_intent(query: str) -> str:
     if any(keyword in query_lower for keyword in analysis_keywords):
         logging.debug("[detect_query_intent] Detected: data_analysis")
         if not any(keyword in query_lower for keyword in hr_keywords):
-            return "data_analysis"
+            if any(keyword in query_lower for keyword in crawling_keywords):
+                return "crawling_analysis"
+            else:
+                return "data_analysis"
 
 
     if any(keyword in query_lower for keyword in search_keywords):
@@ -477,14 +493,15 @@ async def cortex_unified_agent(
                 "total_documents": len(unique_documents)
             }
 
-        elif intent == "data_analysis":
+        elif "analysis" in intent :
             logging.debug("[cortex_unified_agent] data_analysis branch")
             # 데이터 분석 수행
             text, sql, citations = await call_cortex_agent(
                 query,
                 use_analyst=True,
                 use_search=False,
-                max_search_results=max_search_results
+                max_search_results=max_search_results,
+                tag=intent
             )
 
             # SQL 실행
@@ -508,17 +525,14 @@ async def cortex_unified_agent(
 
         elif 'search' in intent :
             logging.debug(f"[cortex_unified_agent] search branch: {intent}")
-            if intent == "hr_search":
-                search_name = "HR Search"
-            else:
-                search_name = "Business Search"
 
             # 문서 검색 수행
             text, sql, citations = await call_cortex_agent(
                 query,
                 use_analyst=False,
                 use_search=True,
-                max_search_results=max_search_results
+                max_search_results=max_search_results,
+                tag=intent
             )
 
             logging.debug(f"[cortex_unified_agent] search response: text: {text[:200]}, citations: {len(citations)}")
