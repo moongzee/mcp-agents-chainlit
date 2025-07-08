@@ -543,7 +543,6 @@ async def on_mcp_connect(connection, session: ClientSession):
 
         # 🔧 순수 agent 저장 (RunnableLambda 체인 없음)
         cl.user_session.set("agent", agent_core)
-        await cl.Message(content=f"MCP 연결 '{connection.name}'이(가) 연결되었습니다.").send()
 
         print("[DEBUG] MCP 연결 완료 - 순수 agent 설정됨")
 
@@ -589,20 +588,7 @@ def load_mcp_servers_from_config():
         except Exception as e:
             print(f"[DEBUG] config.json 읽기 실패: {e}")
             # 기본값으로 fallback
-            return [
-                {
-                    "name": "cortex_default_agent",
-                    "command": "python cortex_agents_v2.py",
-                },
-                {
-                    "name": "google-calendar",
-                    "command": "docker run --rm -i mcp/google-calendar",
-                },
-                {
-                    "name": "firecrawl-mcp-server",
-                    "command": "docker run --rm -i mcp/firecrawl",
-                }
-            ]
+            return []
 
 @cl.on_chat_start
 async def on_chat_start():
