@@ -384,6 +384,7 @@ def detect_query_intent(query: str) -> str:
         "인사", "휴가", "복지", "채용", "인원", "연차", "근무", "급여", "인사제도", "hr", "인사팀", "조직도", "사내", "직원", "경조"
     ]
 
+
     if any(keyword in query_lower for keyword in analysis_keywords):
         logging.debug("[detect_query_intent] Detected: data_analysis")
         if not any(keyword in query_lower for keyword in hr_keywords):
@@ -493,7 +494,7 @@ async def cortex_unified_agent(
                 "total_documents": len(unique_documents)
             }
 
-        elif "analysis" in intent :
+        elif intent == "data_analysis" or intent == "crawling_analysis":
             logging.debug("[cortex_unified_agent] data_analysis branch")
             # 데이터 분석 수행
             text, sql, citations = await call_cortex_agent(
