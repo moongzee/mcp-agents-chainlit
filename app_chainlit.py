@@ -469,7 +469,8 @@ def load_system_prompt(prompt_type: str) -> str:
     else:
         raise ValueError("지원하지 않는 프롬프트 타입입니다.")
     with open(prompt_path, "r", encoding="utf-8") as f:
-        return f.read()
+        content = f.read().format(current_time=current_time)
+    return content
 
 # 2. 모델 생성 함수 수정
 
