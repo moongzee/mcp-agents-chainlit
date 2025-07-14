@@ -2,7 +2,6 @@
 
 # --- 1. 기본 라이브러리 임포트 ---
 import chainlit as cl
-from chainlit.input_widget import Slider, Select, Switch
 import chainlit.types as cl_types
 import chainlit.server as cl_server
 import json
@@ -460,18 +459,20 @@ def auth_callback(username: str, password: str) -> Optional[cl.User]:
         return None
 
 # 1. 프롬프트 로딩 함수 추가
+
 def load_system_prompt(prompt_type: str) -> str:
     if prompt_type == "general":
-        prompt_path = "system_prompt_general.txt"
-    elif prompt_type == "got":
-        prompt_path = "system_prompt_got.txt"
+        prompt_path = "prompt/system_prompt_general.txt"
+    elif prompt_type == "got_deep":
+        prompt_path = "prompt/system_prompt_got_deep.txt"
     else:
         raise ValueError("지원하지 않는 프롬프트 타입입니다.")
     with open(prompt_path, "r", encoding="utf-8") as f:
         return f.read()
 
 # 2. 모델 생성 함수 수정
-def create_llm_model(model_name: str, temperature: float = 0.1):
+
+def create_llm_model(model_name: str):
     """
     모델 이름에 따라 Anthropic(Claude) 또는 Google(Gemini) 모델을 생성합니다.
     """
@@ -480,7 +481,7 @@ def create_llm_model(model_name: str, temperature: float = 0.1):
     if "claude" in model_provider:
         model = ChatAnthropic(
             model=model_name,
-            temperature=temperature,
+            temperature=0.1,
             streaming=True,
             max_tokens=16000,
             max_retries=3,
@@ -489,8 +490,7 @@ def create_llm_model(model_name: str, temperature: float = 0.1):
         try:
             model = ChatGoogleGenerativeAI(
                 model=model_name,
-                temperature=temperature,
-                streaming=True,
+                temperature=0.1,
                 max_output_tokens=16000,  # max_tokens -> max_output_tokens
                 max_retries=3,
             )
@@ -505,8 +505,9 @@ def create_llm_model(model_name: str, temperature: float = 0.1):
     return model
 
 # 3. agent 생성 함수 분리
-def create_agent(model_name: str, prompt_type: str, all_langchain_tools, temperature: float = 0.1):
-    model = create_llm_model(model_name, temperature)
+
+def create_agent(model_name: str, prompt_type: str, all_langchain_tools):
+    model = create_llm_model(model_name)
     SYSTEM_PROMPT = load_system_prompt(prompt_type)
     agent_core = create_react_agent(
         model,
@@ -519,7 +520,7 @@ def create_agent(model_name: str, prompt_type: str, all_langchain_tools, tempera
 # --- 6. MCP 연결 핸들러 정의 ---
 @cl.on_mcp_connect
 async def on_mcp_connect(connection, session: ClientSession):
-    global session_memory_store
+    global session_memory_store  # 전역 변수 사용
 
     try:
         tool_metadatas = await session.list_tools()
@@ -530,10 +531,8 @@ async def on_mcp_connect(connection, session: ClientSession):
         ]
         cl.user_session.set("mcp_tools", mcp_tools)
 
-        # 현재 설정 가져오기
         model_name = cl.user_session.get("model_name", "claude-sonnet-4-20250514")
         prompt_type = cl.user_session.get("prompt_type", "general")
-        temperature = cl.user_session.get("temperature", 0.1)
 
         from langchain_core.tools import Tool
         all_langchain_tools = []
@@ -574,18 +573,20 @@ async def on_mcp_connect(connection, session: ClientSession):
         cl.user_session.set("memory", memory)
         cl.user_session.set("session_memory_store", session_memory_store)
 
-        # 현재 설정으로 Agent 생성
-        agent_core = create_agent(model_name, prompt_type, all_langchain_tools, temperature)
+        # 🔧 순수 Agent core만 생성 (요약은 전처리에서 처리)
+        agent_core = create_agent(model_name, prompt_type, all_langchain_tools)
+
+        # 🔧 순수 agent 저장 (RunnableLambda 체인 없음)
         cl.user_session.set("agent", agent_core)
 
-        print(f"[DEBUG] MCP 연결 완료 - {connection.name} (도구 {len(tool_metadatas.tools)}개)")
-        print(f"[DEBUG] Agent 생성: 모델={model_name}, 프롬프트={prompt_type}, 온도={temperature}")
+        print("[DEBUG] MCP 연결 완료 - 순수 agent 설정됨")
 
     except Exception as e:
         error_msg = f"MCP 연결 처리 중 오류가 발생했습니다: {e}"
         print(error_msg)
         traceback.print_exc()
 
+        # MCP 연결 실패 시 안내
         await send_error_with_reset_guidance(
             "도구 연결에 실패했습니다. 일부 기능이 제한될 수 있습니다.",
             "일반"
@@ -597,85 +598,9 @@ async def on_mcp_disconnect(connection):
 
 # --- 7. Chainlit 메시지 핸들러 ---
 @cl.on_settings_update
-async def on_settings_update(settings):
+async def setup_agent(settings):
     """설정 업데이트 시 에이전트 재설정"""
-    """모든 설정 변경을 여기서 처리"""
-    print(f"[DEBUG] 설정 업데이트: {settings}")
-    
-    # 새로운 설정 적용
-    model_name = settings.get("model_name", "claude-sonnet-4-20250514")
-    prompt_type = settings.get("prompt_type", "general")
-    temperature = settings.get("temperature", 0.1)
-    show_model_info = settings.get("show_model_info", True)
-    
-    # 세션에 설정 저장
-    cl.user_session.set("model_name", model_name)
-    cl.user_session.set("prompt_type", prompt_type)
-    cl.user_session.set("temperature", temperature)
-    cl.user_session.set("show_model_info", show_model_info)
-    
-    # 기존 MCP 도구들 가져와서 agent 재생성
-    mcp_tools = cl.user_session.get("mcp_tools", {})
-    
-    if mcp_tools:
-        # MCP 도구들을 LangChain 도구로 변환
-        from langchain_core.tools import Tool
-        all_langchain_tools = []
-        
-        for conn_name, tools in mcp_tools.items():
-            for tool_info in tools:
-                async def tool_func(tool_input: Any, conn_name=conn_name, tool_name=tool_info['name']):
-                    mcp_session, _ = cl.context.session.mcp_sessions.get(conn_name)
-                    if not mcp_session: 
-                        return f"Error: MCP session for '{conn_name}' not found."
-
-                    if not isinstance(tool_input, dict):
-                        tool_input = {"query": tool_input}
-
-                    try:
-                        tool_result = await mcp_session.call_tool(tool_name, tool_input)
-                        return str(tool_result)
-                    except Exception as e: 
-                        return f"Error calling tool {tool_name}: {e}"
-
-                all_langchain_tools.append(
-                    Tool(
-                        name=tool_info['name'],
-                        description=tool_info['description'],
-                        func=tool_func,
-                        coroutine=tool_func
-                    )
-                )
-        
-        # 새로운 설정으로 에이전트 재생성
-        try:
-            agent_core = create_agent(model_name, prompt_type, all_langchain_tools, temperature)
-            cl.user_session.set("agent", agent_core)
-            
-            # 사용자에게 알림
-            model_display = get_model_display_name(model_name)
-            prompt_display = get_prompt_display_name(prompt_type)
-            
-            update_message = f"⚙️ **설정이 업데이트되었습니다!**\n\n"
-            update_message += f"💭 **모델**: {model_display}\n"
-            update_message += f"📝 **프롬프트**: {prompt_display}\n"
-            update_message += f"🌡️ **창의성**: {temperature}\n"
-            
-            if show_model_info:
-                update_message += f"\n💡 **모델 정보**:\n"
-                if "claude" in model_name.lower():
-                    update_message += "- Anthropic의 Claude 모델을 사용합니다\n"
-                    update_message += "- 긴 문맥을 잘 이해하고 정확한 답변을 제공합니다\n"
-                elif "gemini" in model_name.lower():
-                    update_message += "- Google의 Gemini 모델을 사용합니다\n"
-                    update_message += "- 다양한 형태의 입력을 처리할 수 있습니다\n"
-            
-            await cl.Message(content=update_message).send()
-            
-        except Exception as e:
-            await cl.Message(
-                content=f"❌ 설정 업데이트 중 오류가 발생했습니다: {str(e)}"
-            ).send()
+    pass
 
 
 # config.json에서 MCP 서버 설정 읽어오기
@@ -700,73 +625,77 @@ def load_mcp_servers_from_config():
             # 기본값으로 fallback
             return []
 
-def get_model_display_name(model_name: str) -> str:
-    """모델명을 사용자 친화적 이름으로 변환"""
-    display_mapping = {
-        "claude-sonnet-4-20250514": "Claude 4 Sonnet",
-        "claude-3-7-sonnet-latest": "Claude 3.7 Sonnet",
-        "gemini-2.5-pro": "Gemini 2.5 Pro",
-        "gemini-2.5-flash": "Gemini 2.5 Flash"
-    }
-    return display_mapping.get(model_name, model_name)
-
-def get_prompt_display_name(prompt_type: str) -> str:
-    """프롬프트 타입을 사용자 친화적 이름으로 변환"""
-    prompt_mapping = {
-        "general": "일반 대화",
-        "got": "사고의 연쇄 (GoT)"
-    }
-    return prompt_mapping.get(prompt_type, prompt_type)
+@cl.set_chat_profiles
+async def chat_profiles():
+    return [
+        cl.ChatProfile(
+            name="Claude 4 + GoT deep",
+            markdown_description="Claude Sonnet 4 + GoT 방법론 프롬프트 (Deep)"
+        ),
+        cl.ChatProfile(
+            name="Claude 4 + General",
+            markdown_description="Claude Sonnet 4 + 일반 프롬프트"
+        ),
+        cl.ChatProfile(
+            name="Claude 3.7 + GoT deep",
+            markdown_description="Claude 3.7 Sonnet + GoT 방법론 프롬프트 (Deep)"
+        ),
+        cl.ChatProfile(
+            name="Claude 3.7 + General",
+            markdown_description="Claude 3.7 Sonnet + 일반 프롬프트"
+        ),
+        cl.ChatProfile(
+            name="Gemini 2.5 Pro + GoT deep",
+            markdown_description="Gemini 2.5 Pro + GoT 방법론 프롬프트 (Deep)"
+        ),
+        cl.ChatProfile(
+            name="Gemini 2.5 Pro + General",
+            markdown_description="Gemini 2.5 Pro + General 프롬프트"
+        ),
+        cl.ChatProfile(
+            name="Gemini 2.5 Flash + GoT deep",
+            markdown_description="Gemini 2.5 Flash + GoT 방법론 프롬프트 (Deep)"
+        ),
+        cl.ChatProfile(
+            name="Gemini 2.5 Flash + General",
+            markdown_description="Gemini 2.5 Flash + General 프롬프트"
+        ),
+    ]
 
 @cl.on_chat_start
 async def on_chat_start():
-    """채팅 시작 시 모든 설정을 ChatSettings로 관리"""
-    
-    # 모든 설정을 ChatSettings로 통합
-    await cl.ChatSettings([
-        Select(
-            id="model_name",
-            label="💭 AI 모델",
-            values=[
-                "claude-sonnet-4-20250514",
-                "claude-3-7-sonnet-latest", 
-                "gemini-2.5-pro",
-                "gemini-2.5-flash"
-            ],
-            initial_index=0,  # Claude 4 Sonnet 기본값
-        ),
-        Select(
-            id="prompt_type",
-            label="📝 프롬프트 스타일",
-            values=["general", "got"],
-            initial_index=0,  # 일반 대화 기본값
-        ),
-        Slider(
-            id="temperature",
-            label="🌡️ 창의성 수준 (0: 논리적 ↔ 1: 창의적)",
-            initial=0.1,
-            min=0.0,
-            max=1.0,
-            step=0.1,
-        ),
-        Switch(
-            id="show_model_info",
-            label="📊 모델 정보 표시",
-            initial=True,
-        ),
-    ]).send()
-    
-    # 초기 설정값
-    model_name = "claude-sonnet-4-20250514"
-    prompt_type = "general"
-    temperature = 0.1
-    show_model_info = True
-    
-    # 세션에 설정 저장
+    chat_profile = cl.user_session.get("chat_profile")
+    # 조합에 따라 모델/프롬프트 결정
+    if chat_profile == "Claude 4 + GoT deep":
+        model_name = "claude-sonnet-4-20250514"
+        prompt_type = "got_deep"
+    elif chat_profile == "Claude 4 + General":
+        model_name = "claude-sonnet-4-20250514"
+        prompt_type = "general"
+    elif chat_profile == "Claude 3.7 + GoT deep":
+        model_name = "claude-3-7-sonnet-latest"
+        prompt_type = "got_deep"
+    elif chat_profile == "Claude 3.7 + General":
+        model_name = "claude-3-7-sonnet-latest"
+        prompt_type = "general"
+    elif chat_profile == "Gemini 2.5 Flash + GoT deep":
+        model_name = "gemini-2.5-flash"  
+        prompt_type = "got_deep"
+    elif chat_profile == "Gemini 2.5 Flash + General":
+        model_name = "gemini-2.5-flash"  
+        prompt_type = "general"
+    elif chat_profile == "Gemini 2.5 Pro + GoT deep":
+        model_name = "gemini-2.5-pro"   
+        prompt_type = "got_deep"
+    elif chat_profile == "Gemini 2.5 Pro + general":
+        model_name = "gemini-2.5-pro"   
+        prompt_type = "general"
+    else:
+        model_name = "claude-sonnet-4-20250514"
+        prompt_type = "got_deep"
+
     cl.user_session.set("model_name", model_name)
     cl.user_session.set("prompt_type", prompt_type)
-    cl.user_session.set("temperature", temperature)
-    cl.user_session.set("show_model_info", show_model_info)
 
     # 기존 MCP 연결 및 사용자 정보 처리 코드 유지
     mcp_servers = load_mcp_servers_from_config()
@@ -810,12 +739,7 @@ async def on_chat_start():
         user.display_name = display_name
     except Exception as e:
         print(f"DEBUG: 사용자 표시명 설정 실패: {e}")
-
-    # 환영 메시지
-    welcome_message = f"""
-    안녕하세요 {display_name}님! NOA 입니다. 무엇이든 물어보세요 😊
-    """
-    await cl.Message(content=welcome_message).send()
+    await cl.Message(content=f"안녕하세요 {display_name}님! NOA 입니다. 무엇이든 물어보세요 😊").send()
 
 @retry(
     wait=wait_exponential(multiplier=1, min=2, max=10),

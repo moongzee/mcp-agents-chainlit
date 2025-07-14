@@ -1,29 +1,29 @@
 {
-    "google-calendar": {
-      "command": "docker",
-      "args": [
-        "run",
-        "--rm",
-        "-i",
-        "mcp/google-calendar"
-      ],
-      "transport": "stdio"
-    },
-    "cortex-agents-v2": {
-      "command": "python",
-      "args": [
-        "cortex_agents_v2.py"
-      ],
-      "transport": "stdio"
-    },
-    "crawl-server" :{
-      "command": "docker",
-      "args": [
-        "run",
-        "--rm",
-        "-i",
-        "mcp/firecrawl"
-      ],
-      "transport": "stdio"
-    }
+  "google-calendar": {
+    "command": "docker",
+    "args": [
+      "run",
+      "--rm",
+      "-i",
+      "mcp/google-calendar"
+    ],
+    "transport": "stdio"
+  },
+  "cortex-agents": {
+    "command": "python",
+    "args": [
+      "cortex_agents.py"
+    ],
+    "transport": "stdio"
+  },
+  "crawl-server" :{
+    "command": "docker",
+    "args": [
+      "run",
+      "--rm",
+      "-i",
+      "mcp/firecrawl"
+    ],
+    "transport": "stdio"
   }
+}
