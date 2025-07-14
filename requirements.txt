@@ -10,6 +10,7 @@ langgraph==0.3.4
 langgraph-prebuilt==0.1.8
 langgraph-sdk==0.1.47
 langgraph-checkpoint==2.1.0
+openai
 
 # --- MCP 플랫폼 ---
 mcp==1.9.4
