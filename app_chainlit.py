@@ -2,6 +2,7 @@
 
 # --- 1. 기본 라이브러리 임포트 ---
 import chainlit as cl
+from chainlit.input_widget import Slider, Select, Switch
 import chainlit.types as cl_types
 import chainlit.server as cl_server
 import json
@@ -20,6 +21,7 @@ import codecs
 
 # --- 2. LangChain 관련 라이브러리 임포트 ---
 from langchain_anthropic import ChatAnthropic
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.memory import ConversationBufferMemory
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
@@ -50,13 +52,6 @@ load_dotenv(override=True)
 
 KST = timezone(timedelta(hours=9))
 current_time = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
-try:
-    with open("system_prompt.txt", "r", encoding="utf-8") as f:
-        SYSTEM_PROMPT = f.read().format(current_time=current_time)
-except FileNotFoundError:
-    SYSTEM_PROMPT = "You are a helpful assistant."
-    print("경고: system_prompt.txt 파일을 찾을 수 없어 기본 프롬프트를 사용합니다.")
-
 # 채팅 기록 저장을 위한 SQLite 데이터베이스 초기화
 DB_PATH = "chat_history.db"
 
@@ -368,7 +363,11 @@ async def preprocess_with_silent_summary(input_data):
     memory = session_memory_store[session_id]
 
     user_message = input_data.get("messages", [])
-    system_prompt_message = [SystemMessage(content=SYSTEM_PROMPT)]
+
+    # SYSTEM_PROMPT 전역변수 대신 세션에서 prompt_type을 받아 동적으로 로딩
+    prompt_type = cl.user_session.get("prompt_type", "general")
+    system_prompt = load_system_prompt(prompt_type)
+    system_prompt_message = [SystemMessage(content=system_prompt)]
 
     try:
         memory_vars = memory.load_memory_variables({})
@@ -460,25 +459,67 @@ def auth_callback(username: str, password: str) -> Optional[cl.User]:
         print(f"DEBUG: 로그인 실패 - 사용자명 또는 비밀번호 불일치")
         return None
 
+# 1. 프롬프트 로딩 함수 추가
+def load_system_prompt(prompt_type: str) -> str:
+    if prompt_type == "general":
+        prompt_path = "system_prompt_general.txt"
+    elif prompt_type == "got":
+        prompt_path = "system_prompt_got.txt"
+    else:
+        raise ValueError("지원하지 않는 프롬프트 타입입니다.")
+    with open(prompt_path, "r", encoding="utf-8") as f:
+        return f.read()
 
-def create_robust_anthropic_model():
-    """네트워크 안정성을 위한 강화된 Anthropic 모델 생성"""
+# 2. 모델 생성 함수 수정
+def create_llm_model(model_name: str, temperature: float = 0.1):
+    """
+    모델 이름에 따라 Anthropic(Claude) 또는 Google(Gemini) 모델을 생성합니다.
+    """
+    model_provider = model_name.lower() # 소문자로 변환하여 비교
+    
+    if "claude" in model_provider:
+        model = ChatAnthropic(
+            model=model_name,
+            temperature=temperature,
+            streaming=True,
+            max_tokens=16000,
+            max_retries=3,
+        )
+    elif "gemini" in model_provider:
+        try:
+            model = ChatGoogleGenerativeAI(
+                model=model_name,
+                temperature=temperature,
+                streaming=True,
+                max_output_tokens=16000,  # max_tokens -> max_output_tokens
+                max_retries=3,
+            )
+            print(f"[DEBUG] Google 모델 생성 성공: {model_name}")
+        except Exception as e:
+            print(f"[ERROR] Google 모델 생성 실패: {e}")
+            raise ValueError(f"Google 모델 생성 실패: {model_name} - {e}")
 
-    model = ChatAnthropic(
-        model="claude-sonnet-4-20250514",
-        temperature=0.1,
-        streaming=True,
-        max_tokens=16000,
-        max_retries=3,  # API 레벨 재시도
-        timeout=180.0,  # 전체 요청 타임아웃 3분
-    )
+    else:
+        raise ValueError(f"지원하지 않는 모델입니다: {model_name}")
+    
     return model
 
+# 3. agent 생성 함수 분리
+def create_agent(model_name: str, prompt_type: str, all_langchain_tools, temperature: float = 0.1):
+    model = create_llm_model(model_name, temperature)
+    SYSTEM_PROMPT = load_system_prompt(prompt_type)
+    agent_core = create_react_agent(
+        model,
+        all_langchain_tools,
+        checkpointer=None,
+        prompt=SYSTEM_PROMPT,
+    )
+    return agent_core
 
 # --- 6. MCP 연결 핸들러 정의 ---
 @cl.on_mcp_connect
 async def on_mcp_connect(connection, session: ClientSession):
-    global session_memory_store  # 전역 변수 사용
+    global session_memory_store
 
     try:
         tool_metadatas = await session.list_tools()
@@ -489,10 +530,10 @@ async def on_mcp_connect(connection, session: ClientSession):
         ]
         cl.user_session.set("mcp_tools", mcp_tools)
 
-        model = cl.user_session.get("model")
-        if not model:
-            model = create_robust_anthropic_model()
-            cl.user_session.set("model", model)
+        # 현재 설정 가져오기
+        model_name = cl.user_session.get("model_name", "claude-sonnet-4-20250514")
+        prompt_type = cl.user_session.get("prompt_type", "general")
+        temperature = cl.user_session.get("temperature", 0.1)
 
         from langchain_core.tools import Tool
         all_langchain_tools = []
@@ -533,25 +574,18 @@ async def on_mcp_connect(connection, session: ClientSession):
         cl.user_session.set("memory", memory)
         cl.user_session.set("session_memory_store", session_memory_store)
 
-        # 🔧 순수 Agent core만 생성 (요약은 전처리에서 처리)
-        agent_core = create_react_agent(
-            model,
-            all_langchain_tools,
-            checkpointer=None,
-            prompt=SYSTEM_PROMPT,
-        )
-
-        # 🔧 순수 agent 저장 (RunnableLambda 체인 없음)
+        # 현재 설정으로 Agent 생성
+        agent_core = create_agent(model_name, prompt_type, all_langchain_tools, temperature)
         cl.user_session.set("agent", agent_core)
 
-        print("[DEBUG] MCP 연결 완료 - 순수 agent 설정됨")
+        print(f"[DEBUG] MCP 연결 완료 - {connection.name} (도구 {len(tool_metadatas.tools)}개)")
+        print(f"[DEBUG] Agent 생성: 모델={model_name}, 프롬프트={prompt_type}, 온도={temperature}")
 
     except Exception as e:
         error_msg = f"MCP 연결 처리 중 오류가 발생했습니다: {e}"
         print(error_msg)
         traceback.print_exc()
 
-        # MCP 연결 실패 시 안내
         await send_error_with_reset_guidance(
             "도구 연결에 실패했습니다. 일부 기능이 제한될 수 있습니다.",
             "일반"
@@ -563,9 +597,85 @@ async def on_mcp_disconnect(connection):
 
 # --- 7. Chainlit 메시지 핸들러 ---
 @cl.on_settings_update
-async def setup_agent(settings):
+async def on_settings_update(settings):
     """설정 업데이트 시 에이전트 재설정"""
-    pass
+    """모든 설정 변경을 여기서 처리"""
+    print(f"[DEBUG] 설정 업데이트: {settings}")
+    
+    # 새로운 설정 적용
+    model_name = settings.get("model_name", "claude-sonnet-4-20250514")
+    prompt_type = settings.get("prompt_type", "general")
+    temperature = settings.get("temperature", 0.1)
+    show_model_info = settings.get("show_model_info", True)
+    
+    # 세션에 설정 저장
+    cl.user_session.set("model_name", model_name)
+    cl.user_session.set("prompt_type", prompt_type)
+    cl.user_session.set("temperature", temperature)
+    cl.user_session.set("show_model_info", show_model_info)
+    
+    # 기존 MCP 도구들 가져와서 agent 재생성
+    mcp_tools = cl.user_session.get("mcp_tools", {})
+    
+    if mcp_tools:
+        # MCP 도구들을 LangChain 도구로 변환
+        from langchain_core.tools import Tool
+        all_langchain_tools = []
+        
+        for conn_name, tools in mcp_tools.items():
+            for tool_info in tools:
+                async def tool_func(tool_input: Any, conn_name=conn_name, tool_name=tool_info['name']):
+                    mcp_session, _ = cl.context.session.mcp_sessions.get(conn_name)
+                    if not mcp_session: 
+                        return f"Error: MCP session for '{conn_name}' not found."
+
+                    if not isinstance(tool_input, dict):
+                        tool_input = {"query": tool_input}
+
+                    try:
+                        tool_result = await mcp_session.call_tool(tool_name, tool_input)
+                        return str(tool_result)
+                    except Exception as e: 
+                        return f"Error calling tool {tool_name}: {e}"
+
+                all_langchain_tools.append(
+                    Tool(
+                        name=tool_info['name'],
+                        description=tool_info['description'],
+                        func=tool_func,
+                        coroutine=tool_func
+                    )
+                )
+        
+        # 새로운 설정으로 에이전트 재생성
+        try:
+            agent_core = create_agent(model_name, prompt_type, all_langchain_tools, temperature)
+            cl.user_session.set("agent", agent_core)
+            
+            # 사용자에게 알림
+            model_display = get_model_display_name(model_name)
+            prompt_display = get_prompt_display_name(prompt_type)
+            
+            update_message = f"⚙️ **설정이 업데이트되었습니다!**\n\n"
+            update_message += f"💭 **모델**: {model_display}\n"
+            update_message += f"📝 **프롬프트**: {prompt_display}\n"
+            update_message += f"🌡️ **창의성**: {temperature}\n"
+            
+            if show_model_info:
+                update_message += f"\n💡 **모델 정보**:\n"
+                if "claude" in model_name.lower():
+                    update_message += "- Anthropic의 Claude 모델을 사용합니다\n"
+                    update_message += "- 긴 문맥을 잘 이해하고 정확한 답변을 제공합니다\n"
+                elif "gemini" in model_name.lower():
+                    update_message += "- Google의 Gemini 모델을 사용합니다\n"
+                    update_message += "- 다양한 형태의 입력을 처리할 수 있습니다\n"
+            
+            await cl.Message(content=update_message).send()
+            
+        except Exception as e:
+            await cl.Message(
+                content=f"❌ 설정 업데이트 중 오류가 발생했습니다: {str(e)}"
+            ).send()
 
 
 # config.json에서 MCP 서버 설정 읽어오기
@@ -590,16 +700,79 @@ def load_mcp_servers_from_config():
             # 기본값으로 fallback
             return []
 
+def get_model_display_name(model_name: str) -> str:
+    """모델명을 사용자 친화적 이름으로 변환"""
+    display_mapping = {
+        "claude-sonnet-4-20250514": "Claude 4 Sonnet",
+        "claude-3-7-sonnet-latest": "Claude 3.7 Sonnet",
+        "gemini-2.5-pro": "Gemini 2.5 Pro",
+        "gemini-2.5-flash": "Gemini 2.5 Flash"
+    }
+    return display_mapping.get(model_name, model_name)
+
+def get_prompt_display_name(prompt_type: str) -> str:
+    """프롬프트 타입을 사용자 친화적 이름으로 변환"""
+    prompt_mapping = {
+        "general": "일반 대화",
+        "got": "사고의 연쇄 (GoT)"
+    }
+    return prompt_mapping.get(prompt_type, prompt_type)
+
 @cl.on_chat_start
 async def on_chat_start():
-    """채팅 시작 시 초기화 및 서버 설정"""
+    """채팅 시작 시 모든 설정을 ChatSettings로 관리"""
+    
+    # 모든 설정을 ChatSettings로 통합
+    await cl.ChatSettings([
+        Select(
+            id="model_name",
+            label="💭 AI 모델",
+            values=[
+                "claude-sonnet-4-20250514",
+                "claude-3-7-sonnet-latest", 
+                "gemini-2.5-pro",
+                "gemini-2.5-flash"
+            ],
+            initial_index=0,  # Claude 4 Sonnet 기본값
+        ),
+        Select(
+            id="prompt_type",
+            label="📝 프롬프트 스타일",
+            values=["general", "got"],
+            initial_index=0,  # 일반 대화 기본값
+        ),
+        Slider(
+            id="temperature",
+            label="🌡️ 창의성 수준 (0: 논리적 ↔ 1: 창의적)",
+            initial=0.1,
+            min=0.0,
+            max=1.0,
+            step=0.1,
+        ),
+        Switch(
+            id="show_model_info",
+            label="📊 모델 정보 표시",
+            initial=True,
+        ),
+    ]).send()
+    
+    # 초기 설정값
+    model_name = "claude-sonnet-4-20250514"
+    prompt_type = "general"
+    temperature = 0.1
+    show_model_info = True
+    
+    # 세션에 설정 저장
+    cl.user_session.set("model_name", model_name)
+    cl.user_session.set("prompt_type", prompt_type)
+    cl.user_session.set("temperature", temperature)
+    cl.user_session.set("show_model_info", show_model_info)
+
+    # 기존 MCP 연결 및 사용자 정보 처리 코드 유지
     mcp_servers = load_mcp_servers_from_config()
 
     try:
-
         print("[DEBUG] 직접 MCP 연결 시도...")
-
-        # 방법 1: 각 서버에 대해 직접 연결
         for i, server in enumerate(mcp_servers, 1):
             try:
                 conn_request = cl_types.ConnectStdioMCPRequest(
@@ -610,50 +783,39 @@ async def on_chat_start():
                 )
                 await cl_server.connect_mcp(conn_request, cl.context.session.user)
                 print(f"[DEBUG] MCP 서버 {i} ({server['name']}) 연결 성공")
-
-                # 서버 간 연결 대기 시간 (선택사항)
                 if i < len(mcp_servers):
-                    await asyncio.sleep(0.5)  # 0.5초 대기
-
+                    await asyncio.sleep(0.5)
             except Exception as server_error:
                 print(f"[DEBUG] MCP 서버 {i} ({server['name']}) 연결 실패: {server_error}")
-                continue  # 다음 서버 계속 시도
-
-
+                continue
     except Exception as mcp_error:
         print(f"[DEBUG] MCP 연결 전체 실패: {mcp_error}")
-        # 기본 autoconnect로 fallback
         try:
             await cl.mcp.autoconnect()
             print("[DEBUG] Fallback autoconnect 성공")
         except Exception as fallback_error:
             print(f"[DEBUG] Fallback autoconnect도 실패: {fallback_error}")
 
-    # 현재 사용자 정보 가져오기
     user = cl.user_session.get("user")
     if not user:
         user = cl.context.session.user
         cl.user_session.set("user", user)
-
     if not user:
         await cl.Message(content="로그인이 필요합니다. 다시 로그인해주세요.").send()
         return
-
     cl.user_session.set("mcp_tools", {})
     cl.user_session.set("message_count", 0)
-
-    # 환영 메시지 - 표시명 우선, 없으면 사용자명, 없으면 기본값
     display_name = user.metadata.get("display_name") or user.metadata.get("username") or "사용자"
-
-    # 🔧 사용자 정보 업데이트 시도
     try:
-        # Chainlit에서 사용자 표시명을 강제로 설정
         user.display_name = display_name
-
     except Exception as e:
         print(f"DEBUG: 사용자 표시명 설정 실패: {e}")
 
-    await cl.Message(content=f"안녕하세요 {display_name}님! NOA 입니다. 무엇이든 물어보세요 😊").send()
+    # 환영 메시지
+    welcome_message = f"""
+    안녕하세요 {display_name}님! NOA 입니다. 무엇이든 물어보세요 😊
+    """
+    await cl.Message(content=welcome_message).send()
 
 @retry(
     wait=wait_exponential(multiplier=1, min=2, max=10),
