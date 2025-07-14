@@ -21,6 +21,7 @@ import codecs
 # --- 2. LangChain 관련 라이브러리 임포트 ---
 from langchain_anthropic import ChatAnthropic
 from langchain_google_genai import ChatGoogleGenerativeAI
+from google.api_core.exceptions import ServiceUnavailable
 from langchain.memory import ConversationBufferMemory
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
@@ -976,6 +977,21 @@ async def on_message(message: cl.Message):
                     "API"
                 )
                 return
+        
+        except ServiceUnavailable as e:
+            if "model is overloaded" in str(e).lower() or "503" in str(e):
+                await send_error_with_reset_guidance(
+                    "Google Gemini 서버가 과부하 상태입니다.",
+                    "API"
+                )
+                return
+            else:
+                await send_error_with_reset_guidance(
+                    f"Google API 오류가 발생했습니다: {str(e)}",
+                    "API"
+                )
+                return
+
 
         except MemoryError as memory_error:
             print(f"[DEBUG] 메모리 에러: {memory_error}")

@@ -1,15 +1,17 @@
 from typing import Any, Dict, Tuple, List, Optional
-import httpx
-from mcp.server.fastmcp import FastMCP
 import os
+import sys
 import json
 import uuid
-from dotenv import load_dotenv, find_dotenv
+import httpx
 import asyncio
 import requests
 import logging
-import sys
 import traceback
+from dotenv import load_dotenv, find_dotenv
+from mcp.server.fastmcp import FastMCP
+from typing import Literal
+from openai import AsyncOpenAI
 
 # Setup logging to stderr only
 logging.basicConfig(
@@ -21,15 +23,21 @@ logging.basicConfig(
 # Load environment
 load_dotenv(find_dotenv())
 
+# OpenAI client 초기화 (환경변수 확인 추가)
+try:
+    client = AsyncOpenAI()
+except Exception as e:
+    logging.warning(f"OpenAI client 초기화 실패 (OPENAI_API_KEY 확인 필요): {e}")
+    client = None
+
 # Initialize FastMCP server
 mcp = FastMCP("cortex_agent")
 
 # Constants
-SEMANTIC_MODEL_FILE = os.getenv("SEMANTIC_MODEL_FILE", default="@CORTEX_ANALYST_DEMO.LLM_POC.CORTEX_STAGE/fashion_streamlit.yaml")
-CORTEX_SEARCH_SERVICE = os.getenv("CORTEX_SEARCH_SERVICE", default="CORTEX_ANALYST_DEMO.LLM_POC.DOCS_MEETING")
 SNOWFLAKE_ACCOUNT_URL = os.getenv("SNOWFLAKE_ACCOUNT_URL", default="https://a1041574869271-eland-partner.snowflakecomputing.com")
 SNOWFLAKE_PAT = os.getenv("SNOWFLAKE_PAT", default="yJraWQiOiIyMTA0NTc2OTI3OTg5ODIiLCJhbGciOiJFUzI1NiJ9.eyJwIjoiMTI1NDQyNjA6MzIxMTMzMDA1MyIsImlzcyI6IlNGOjEwMzIiLCJleHAiOjE3ODE4MzA2NDZ9.zIsLtQrtoIp_WYZJyv_bU6U_KQ8Vr0T8MICvAjpgOb0wilLCwPcSAvH4wKzE4OGg8lFdEN7tR1X7KmfE56XxKg")
 SEMANTIC_MODEL_PATH = os.getenv("SEMANTIC_MODEL_PATH", default="@CORTEX_ANALYST_DEMO.LLM_POC.CORTEX_STAGE/")
+SEARCH_SERVICE_SCHEMA = os.getenv("SEARCH_SERVICE_SCHEMA", default="CORTEX_ANALYST_DEMO.LLM_POC")
 
 if not SNOWFLAKE_PAT:
     raise RuntimeError("Set SNOWFLAKE_PAT environment variable")
@@ -43,6 +51,107 @@ API_HEADERS = {
     "Content-Type": "application/json",
 }
 
+async def agent_run_request(
+    query: str,
+    description: Optional[str] = None,
+    semantic_model_file: Optional[str] = None,
+    search_table: Optional[str] = None,
+    search_type: Optional[str] = None,
+    search_filters: Optional[Dict] = None,
+    max_search_results: int = 5
+) -> Dict[str, Any]:
+    """
+    공통 agent 호출 함수. semantic_model_file이 있으면 text_to_sql, search_table이 있으면 search로 분기.
+    """
+    if semantic_model_file:
+        if description:
+            response_instruction = description
+        else:
+            response_instruction = "cortex_analyst_text_to_sql"
+        tools = [
+            {"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}},
+            {"tool_spec": {"type": "sql_exec", "name": "sql_execution_tool"}}
+        ]
+        tool_resources = {
+            "Analyst1": {"semantic_model_file": semantic_model_file}
+        }
+    elif search_table and search_type:
+        if description:
+            response_instruction = description
+        else:
+            response_instruction = "cortex_search"
+        tools = [
+            {"tool_spec": {
+                "type": "cortex_search",
+                "name": search_type,
+                "description": f"Search for {search_type} documents."
+            }}
+        ]
+        tool_resources = {
+            search_type: {
+                "name": search_table,
+                "max_results": max_search_results,
+                "title_column": "relative_path",
+                "id_column": "doc_id",
+                "filter": search_filters or {}
+            }
+        }
+    else:
+        raise ValueError("Either semantic_model_file or (search_table and search_type) must be provided.")
+
+    payload = {
+        "model": "claude-4-sonnet",
+        "response_instruction": response_instruction,
+        "experimental": {},
+        "tools": tools,
+        "tool_resources": tool_resources,
+        "tool_choice": {"type": "auto"},
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": query}]}
+        ],
+    }
+
+    request_id = str(uuid.uuid4())
+    url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/cortex/agent:run"
+    headers = {
+        **API_HEADERS,
+        "Accept": "text/event-stream",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream(
+                "POST",
+                url,
+                json=payload,
+                headers=headers,
+                params={"requestId": request_id},
+            ) as resp:
+                resp.raise_for_status()
+                text, sql, citations = await process_sse_response(resp)
+
+        # JSON 파싱 시도 (실패해도 원본 텍스트 유지)
+        try:
+            parsed_text = json.loads(text)
+        except json.JSONDecodeError:
+            parsed_text = text 
+
+        # Execute any SQL that was generated during the search
+        results = None
+        if sql:
+            results = await execute_sql(sql)
+
+        return {
+            "text": parsed_text,
+            "sql": sql,
+            "citations": citations,
+            "results": results,
+            "analysis_type": semantic_model_file or search_table or None,
+            "success": True
+        }
+    except Exception as e:
+        logging.error(f"Cortex Agent 호출 중 오류 발생: {e}")
+        return {"error": f"Cortex Agent 호출 중 오류 발생: {e}", "success": False}
 
 def safe_string_convert(value: Any) -> str:
     """안전하게 값을 문자열로 변환"""
@@ -51,7 +160,6 @@ def safe_string_convert(value: Any) -> str:
     if isinstance(value, str):
         return value
     return str(value)
-
 
 async def process_sse_response(resp: httpx.Response) -> Tuple[str, str, List[Dict]]:
     """SSE 응답을 처리하여 텍스트, SQL, citations를 추출"""
@@ -92,7 +200,6 @@ async def process_sse_response(resp: httpx.Response) -> Tuple[str, str, List[Dic
                             })
     return text, sql, citations
 
-
 async def execute_sql(sql: str) -> Dict[str, Any]:
     """SQL을 실행하고 결과를 반환"""
     try:
@@ -100,9 +207,9 @@ async def execute_sql(sql: str) -> Dict[str, Any]:
         sql_api_url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/statements"
         sql_payload = {
             "statement": sql.replace(";", ""),
-            "timeout": 120
+            "timeout": 300
         }
-        async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
+        async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
             response = await client.post(
                 sql_api_url,
                 json=sql_payload,
@@ -119,532 +226,174 @@ async def execute_sql(sql: str) -> Dict[str, Any]:
         logging.error("SQL execution error: %s\n%s", e, traceback.format_exc())
         return {"error": f"SQL execution error: {e}\n{traceback.format_exc()}"}
 
-
-async def call_cortex_agent(
-    query: str,
-    use_analyst: bool = True,
-    use_search: bool = True,
-    max_search_results: int = 15,
-    search_filters: Optional[Dict] = None,
-    custom_instruction: Optional[str] = None,
-    tag: Optional[str] = None
-) -> Tuple[str, str, List[Dict]]:
+@mcp.tool(description="Classifies the user query to determine the most appropriate tool among internal fashion data, mixed internal-external analysis, business documents, or HR policies.")
+async def detect_query_intent(query: str) -> Dict[str, Any]:
     """
-    통합된 Cortex Agent 호출 함수
-
-    Args:
-        query: 사용자 질문
-        use_analyst: Analyst 도구 사용 여부
-        use_search: Search 도구 사용 여부
-        max_search_results: 최대 검색 결과 수
-        search_filters: 검색 필터
-        custom_instruction: 커스텀 응답 지시사항
-        tag: 태그
+    사용자 쿼리를 분석하여 가장 적절한 도구를 결정합니다.
+    
+    Returns:
+        dict: 추천 툴과 이유를 포함한 결과
     """
+    if not client:
+        # OpenAI 클라이언트가 없는 경우 기본 키워드 기반 분류
+        return fallback_intent_detection(query)
 
-    # 기본 응답 지시사항
-    if custom_instruction is None:
-        if use_analyst and use_search:
-            response_instruction = (
-                "You are a helpful data analytics agent. "
-                "1. Use the Analyst1 tool to convert user questions into SQL when data analysis is needed. "
-                "2. Use the Search tool to find relevant documents when document search is needed. "
-                "3. Combine results appropriately and provide structured answers."
-            )
-        elif use_analyst:
-            response_instruction = (
-                "You are a data analyst. Use the Analyst1 tool to convert questions into SQL and analyze data."
-            )
-        elif use_search:
-            response_instruction = (
-                "You are a document search assistant. Use the Search1 tool to find relevant information."
-            )
-        else:
-            response_instruction = "Answer the question based on available context."
-    else:
-        response_instruction = custom_instruction
+    prompt = f"""
+You are a tool selection assistant. Choose the most appropriate tool based on the user's query.
 
-    # 도구 구성
-    tools = []
-    tool_resources = {}
+Available tools:
+- fashion_analyst: Use this tool for queries related to fashion product sales, top-selling items, inventory, customer visits, and financial statements.
+  Queries about who made the best-selling product, sales performance, or product-related employee data belong here.
+  This includes internal performance data of E-Land brands such as SPAO, New Balance, Shoopen, Roem, and MIXXO.
 
-    if use_analyst:
-        if tag == "crawling_analysis":
-            tools.append({"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}})
-            tool_resources["Analyst1"] = {"semantic_model_file": SEMANTIC_MODEL_PATH + 'fashion_keyword.yaml'}
-        else:
-            tools.append({"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}})
-            tool_resources["Analyst1"] = {"semantic_model_file": SEMANTIC_MODEL_FILE}
+- market_analyst: For analysis involving competitor pricing, discount rates, and customer reviews, using both internal and external data.
+  This tool is used for queries involving external competitors such as Musinsa, Ably, Uniqlo, and Handsome Mall, or for comparing E-Land brands to competitors.
 
-    if use_search:
-        tools.append({"tool_spec": {
-            "type": "cortex_search",
-            "name": "Business Search",
-            "description": "Search for business-related documents such as sales reports, performance records, financial data, and business analysis."}})
-        tools.append({"tool_spec": {
-            "type": "cortex_search",
-            "name": "HR Search",
-            "description": "Search for internal HR documents, including employee policies, benefits, organizational charts, and HR guidelines."}})
+- business_document_search: For referencing internal company documents such as terminology, report formats, or business logic.
 
-        # 기본 검색 필터
-        default_filters = {} # {"@eq": {"language": "Korean"}}
-        if search_filters:
-            default_filters = search_filters
+- hr_document_search: For internal HR documents such as leave policies, benefits, organizational charts, vacations, onboarding data, and general employee management policies.
+  Note: HR search is NOT for product sales, brand performance, or market analytics.
 
-        tool_resources["Business Search"] = {
-            "name": 'CORTEX_ANALYST_DEMO.LLM_POC.DOCS_MEETING',
-            "max_results": max_search_results,
-            "title_column": "relative_path",
-            "id_column": "doc_id",
-            "filter": default_filters
-        }
-        tool_resources["HR Search"] = {
-            "name": 'CORTEX_ANALYST_DEMO.LLM_POC.HR_DOCS_MEETING',
-            "max_results": max_search_results,
-            "title_column": "relative_path",
-            "id_column": "doc_id",
-            "filter": default_filters
-        }
+Respond with only the tool name.
 
-    if use_analyst:
-        tools.append({"tool_spec": {"type": "sql_exec", "name": "sql_execution_tool"}})
-
-    payload = {
-        "model": "claude-4-sonnet",
-        "response_instruction": response_instruction,
-        "experimental": {},
-        "tools": tools,
-        "tool_resources": tool_resources,
-        "tool_choice": {"type": "auto"},
-        "messages": [
-            {"role": "user", "content": [{"type": "text", "text": query}]}
-        ],
-    }
-
-    request_id = str(uuid.uuid4())
-    url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/cortex/agent:run"
-    headers = {
-        **API_HEADERS,
-        "Accept": "text/event-stream",
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        async with client.stream(
-            "POST",
-            url,
-            json=payload,
-            headers=headers,
-            params={"requestId": request_id},
-        ) as resp:
-            resp.raise_for_status()
-            return await process_sse_response(resp)
-
-
-def group_citations_by_document(citations: List[Dict]) -> Dict[str, Dict]:
-    """Citations를 문서별로 그룹화"""
-    documents_by_path = {}
-    for citation in citations:
-        relative_path = citation.get("source_id", "")
-        if not relative_path:
-            continue
-
-        if relative_path not in documents_by_path:
-            documents_by_path[relative_path] = {
-                "title": citation.get("title", ""),
-                "chunks": [],
-                "source": relative_path
-            }
-
-        content = citation.get("content", "")
-        if content:
-            documents_by_path[relative_path]["chunks"].append(content)
-
-    return documents_by_path
-
-
-async def generate_styled_report(query: str, data_results: Dict, citations: List[Dict]) -> str:
-    """문서 템플릿을 참고하여 스타일이 적용된 보고서 생성"""
-
-    # 문서별로 청크들을 그룹화
-    documents_by_path = group_citations_by_document(citations)
-
-    # 각 문서의 전체 내용을 재구성하여 템플릿 스타일 분석
-    document_styles = []
-    for path, doc_info in documents_by_path.items():
-        combined_content = " ".join(doc_info["chunks"])[:1000]
-        document_styles.append({
-            "title": doc_info["title"],
-            "content_sample": combined_content,
-            "source": path,
-            "chunk_count": len(doc_info["chunks"])
-        })
-
-    # 보고서 생성을 위한 프롬프트 구성
-    template_instruction = f"""
-    다음 {len(document_styles)}개 문서들의 형태와 어투를 참고하여 데이터 분석 보고서를 작성해주세요:
-
-    참고 문서 스타일:
-    """
-
-    for i, style in enumerate(document_styles):
-        template_instruction += f"""
-        문서 {i+1}: {style['title']} (청크 수: {style['chunk_count']})
-        내용 샘플: {style['content_sample']}
-        출처: {style['source']}
-        ---
-        """
-
-    template_instruction += f"""
-
-    위 문서들의 형식, 어투, 구조를 참고하여 다음 데이터 분석 결과를 바탕으로 보고서를 작성해주세요:
-
-    사용자 질문: {query}
-    데이터 분석 결과: {json.dumps(data_results, ensure_ascii=False, indent=2)}
-
-    보고서 작성 시 다음 사항을 고려해주세요:
-    1. 참고 문서의 어투와 형식을 따라주세요
-    2. 데이터에서 도출된 핵심 인사이트를 강조해주세요
-    3. 구체적인 수치와 함께 설명해주세요
-    4. 결론과 제언을 포함해주세요
-    5. 각 문서에서 추출한 스타일 요소들을 종합적으로 반영해주세요
-    """
-
-    # Cortex Complete API를 사용하여 보고서 생성
-    payload = {
-        "model": "claude-4-sonnet",
-        "messages": [
-            {"role": "user", "content": template_instruction}
-        ],
-        "max_tokens": 2000,
-        "temperature": 0.7
-    }
+Query: "{query}"
+"""
 
     try:
-        request_id = str(uuid.uuid4())
-        url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/cortex/complete"
-
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                url,
-                json=payload,
-                headers=API_HEADERS,
-                params={"requestId": request_id},
-            )
-
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("choices", [{}])[0].get("message", {}).get("content", "보고서 생성에 실패했습니다.")
-        else:
-            return f"보고서 생성 API 오류: {response.status_code} {response.text}"
-
-    except Exception as e:
-        logging.error("Report generation error: %s\n%s", e, traceback.format_exc())
-        return f"보고서 생성 중 오류 발생: {e}"
-
-
-def detect_query_intent(query: str) -> str:
-    """사용자 질문의 의도를 파악 (DEBUG)"""
-    query_lower = safe_string_convert(query).lower()
-    logging.debug(f"[detect_query_intent] query_lower: {query_lower}")
-
-    # 보고서 목록 요청 키워드들
-    report_list_keywords = [
-        "보고서목록", "보고서 목록", "사용가능한 보고서", "available reports",
-        "문서목록", "문서 목록", "어떤 문서", "어떤 보고서", "뭐가 있어", "뭐가있어",
-        "목록", "리스트", "list", "documents", "reports", "파일목록", "파일 목록"
-    ]
-
-    if any(keyword in query_lower for keyword in report_list_keywords):
-        logging.debug("[detect_query_intent] Detected: report_list")
-        return "report_list"
-
-
-    # 데이터 분석 키워드들
-    analysis_keywords = [
-        "분석", "조회", "데이터", "통계", "집계", "합계", "평균", "최대", "최소",
-        "sql", "select", "where", "group by", "분석해줘", "보여줘"
-    ]
-
-    # 경쟁사 및 자사 키워드 = ["경쟁사", "자사", "회사", "회사 정보", "회사 정보 조회", "회사 정보 조회해줘", "회사 정보 조회해줘"]
-    crawling_keywords = [
-        "경쟁사", "크롤링", "트렌드", "리뷰", "가격", "무신사","가격대","키워드","긍부정","긍정","부정","CS","해시태그"
-    ]
-
-    # 문서 검색 키워드들
-    search_keywords = [
-        "찾아줘", "알려줘","검색", "문서", "내용", "정보", "자료", "참고", "방법", "규정"
-    ]
-
-    business_keywords = [
-        "매출", "영업", "실적", "성과", "비즈니스", "사업", "report", "business", "재무", "finance", "판매", "고객", "시장", "분기", "연간"
-    ]
-
-    # 사내 지식(HR) 관련 키워드
-    hr_keywords = [
-        "인사", "휴가", "복지", "채용", "인원", "연차", "근무", "급여", "인사제도", "hr", "인사팀", "조직도", "사내", "직원", "경조"
-    ]
-
-
-    if any(keyword in query_lower for keyword in analysis_keywords):
-        logging.debug("[detect_query_intent] Detected: data_analysis")
-        if not any(keyword in query_lower for keyword in hr_keywords):
-            if any(keyword in query_lower for keyword in crawling_keywords):
-                return "crawling_analysis"
-            else:
-                return "data_analysis"
-
-
-    if any(keyword in query_lower for keyword in search_keywords):
-        # 비즈니스 보고서 관련 키워드
-
-        if any(keyword in query_lower for keyword in business_keywords):
-            logging.debug("[detect_query_intent] Detected: business_search")
-            return "business_search"
-        elif any(keyword in query_lower for keyword in hr_keywords):
-            logging.debug("[detect_query_intent] Detected: hr_search")
-            return "hr_search"
-
-        logging.debug("[detect_query_intent] Detected: document_search")
-        return "document_search" # 통합 검색
-
-    # 기본값은 통합 분석
-    logging.debug("[detect_query_intent] Detected: integrated_analysis (default)")
-    return "integrated_analysis"
-
-
-@mcp.tool(description="Unified Cortex Agent that handles data analysis, document search, and report generation based on query intent.")
-async def cortex_unified_agent(
-    query: str,
-    force_mode: Optional[str] = None,
-    include_styled_report: bool = False,
-    max_search_results: int = 15
-) -> Dict[str, Any]:
-    """
-    통합된 Cortex Agent 도구 - 질문 의도에 따라 적절한 기능을 자동 선택
-
-    Args:
-        query: 사용자 질문
-        force_mode: 강제 모드 ("data_analysis", "document_search", "report_list", "integrated_analysis")
-        include_styled_report: 스타일이 적용된 보고서 생성 여부
-        max_search_results: 최대 검색 결과 수
-
-    Returns:
-        dict: 통합된 분석 결과
-    """
-
-    # 질문 의도 파악
-    intent = force_mode if force_mode else detect_query_intent(query)
-
-    try:
-        if intent == "report_list":
-            # 보고서 목록 반환
-            text, sql, citations = await call_cortex_agent(
-                "시스템에 있는 모든 문서와 보고서 목록을 보여주세요",
-                use_analyst=False,
-                use_search=True,
-                max_search_results=50
-            )
-
-            # 중복 제거된 문서 목록 생성
-            unique_documents = {}
-            for citation in citations:
-                relative_path = citation.get("source_id", "")
-                if relative_path and relative_path not in unique_documents:
-                    content = citation.get("content", "")
-                    unique_documents[relative_path] = {
-                        "relative_path": relative_path,
-                        "title": citation.get("title", ""),
-                        "doc_id": citation.get("doc_id", ""),
-                        "sample_content": content[:200] if content else ""
-                    }
-
-            # 문서 타입별 분류
-            document_types = {}
-            for path, doc_info in unique_documents.items():
-                if "." in path:
-                    ext = path.split(".")[-1].split("_")[0]
-                else:
-                    ext = "unknown"
-
-                if ext not in document_types:
-                    document_types[ext] = []
-                document_types[ext].append(doc_info)
-
-            # 사용자 친화적인 응답 생성
-            if unique_documents:
-                response_text = f"📋 **사용 가능한 보고서 목록** (총 {len(unique_documents)}개)\n\n"
-
-                for doc_type, docs in document_types.items():
-                    response_text += f"**{doc_type.upper()} 파일 ({len(docs)}개):**\n"
-                    for doc in docs:
-                        response_text += f"• {doc['relative_path']}\n"
-                        if doc['sample_content']:
-                            response_text += f"  └ 내용 미리보기: {doc['sample_content']}...\n"
-                    response_text += "\n"
-
-                response_text += "위 보고서들을 활용하여 데이터 분석이나 문서 검색을 요청하실 수 있습니다."
-            else:
-                response_text = "❌ 현재 사용 가능한 보고서를 찾을 수 없습니다."
-
-            return {
-                "intent": intent,
-                "response": response_text,
-                "unique_documents": list(unique_documents.values()),
-                "document_types": document_types,
-                "total_documents": len(unique_documents)
-            }
-
-        elif intent == "data_analysis" or intent == "crawling_analysis":
-            logging.debug("[cortex_unified_agent] data_analysis branch")
-            # 데이터 분석 수행
-            text, sql, citations = await call_cortex_agent(
-                query,
-                use_analyst=True,
-                use_search=False,
-                max_search_results=max_search_results,
-                tag=intent
-            )
-
-            # SQL 실행
-            results = await execute_sql(sql) if sql else None
-
-            response_data = {
-                "intent": intent,
-                "response": text,
-                "sql": sql,
-                "results": results,
-                "citations": citations
-            }
-
-            # 스타일이 적용된 보고서 생성 (요청 시)
-            if include_styled_report and citations:
-                styled_report = await generate_styled_report(query, results or {}, citations)
-                response_data["styled_report"] = styled_report
-
-            logging.debug(f"[cortex_unified_agent] data_analysis response: {response_data}")
-            return response_data
-
-        elif 'search' in intent :
-            logging.debug(f"[cortex_unified_agent] search branch: {intent}")
-
-            # 문서 검색 수행
-            text, sql, citations = await call_cortex_agent(
-                query,
-                use_analyst=False,
-                use_search=True,
-                max_search_results=max_search_results,
-                tag=intent
-            )
-
-            logging.debug(f"[cortex_unified_agent] search response: text: {text[:200]}, citations: {len(citations)}")
-            return {
-                "intent": intent,
-                "response": text,
-                "citations": citations,
-                "found_documents": len(citations)
-            }
-
-
-        else:  # integrated_analysis
-            # 통합 분석 (데이터 + 문서)
-            text, sql, citations = await call_cortex_agent(
-                query,
-                use_analyst=True,
-                use_search=True,
-                max_search_results=max_search_results
-            )
-
-            # SQL 실행
-            results = await execute_sql(sql) if sql else None
-
-            response_data = {
-                "intent": intent,
-                "response": text,
-                "sql": sql,
-                "results": results,
-                "citations": citations
-            }
-
-            # 스타일이 적용된 보고서 생성 (요청 시)
-            if include_styled_report and citations:
-                styled_report = await generate_styled_report(query, results or {}, citations)
-                response_data["styled_report"] = styled_report
-
-            return response_data
-
-    except Exception as e:
-        logging.error(f"Error in cortex_unified_agent: {e}")
-        return {
-            "intent": intent,
-            "error": str(e),
-            "response": f"처리 중 오류가 발생했습니다: {e}"
-        }
-
-
-@mcp.tool(description="Generate comprehensive analysis reports with document template styling.")
-async def generate_comprehensive_report(
-    query: str,
-    template_documents: Optional[List[str]] = None
-) -> Dict[str, Any]:
-    """
-    포괄적인 분석 보고서 생성 (문서 템플릿 스타일 적용)
-
-    Args:
-        query: 분석 질문
-        template_documents: 템플릿으로 사용할 문서 경로 목록
-
-    Returns:
-        dict: 포괄적인 분석 보고서
-    """
-
-    # 1단계: 통합 분석 수행
-    analysis_result = await cortex_unified_agent(
-        query,
-        force_mode="integrated_analysis",
-        include_styled_report=False,
-        max_search_results=20
-    )
-
-    # 2단계: 템플릿 문서 추가 검색 (지정된 경우)
-    template_citations = []
-    if template_documents:
-        for doc_path in template_documents:
-            try:
-                text, sql, citations = await call_cortex_agent(
-                    f"문서 {doc_path}의 내용을 찾아주세요",
-                    use_analyst=False,
-                    use_search=True,
-                    max_search_results=10,
-                    search_filters={
-                        "@and": [
-                            {"@eq": {"language": "Korean"}},
-                            {"@eq": {"relative_path": doc_path}}
-                        ]
-                    }
-                )
-                template_citations.extend(citations)
-            except Exception as e:
-                logging.warning(f"템플릿 문서 {doc_path} 검색 실패: {e}")
-
-    # 3단계: 스타일이 적용된 보고서 생성
-    all_citations = analysis_result.get("citations", []) + template_citations
-    styled_report = ""
-
-    if all_citations:
-        styled_report = await generate_styled_report(
-            query,
-            analysis_result.get("results", {}),
-            all_citations
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a tool selector."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
         )
 
+        tool_name = response.choices[0].message.content.strip()
+        logging.info(f"Selected tool: {tool_name}")
+
+        return {
+            "recommended_tool": tool_name,
+            "method": "openai_classification",
+            "success": True
+        }
+    except Exception as e:
+        logging.error(f"OpenAI 분류 실패, 폴백 사용: {e}")
+        return fallback_intent_detection(query)
+
+def fallback_intent_detection(query: str) -> Dict[str, Any]:
+    """OpenAI가 사용 불가능한 경우 키워드 기반 폴백 분류"""
+    query_lower = query.lower()
+    
+    # HR 키워드
+    hr_keywords = ["인사", "휴가", "복지", "채용", "연차", "근무", "급여", "조직도", "hr"]
+    if any(keyword in query_lower for keyword in hr_keywords):
+        return {
+            "recommended_tool": "hr_document_search",
+            "method": "keyword_fallback", 
+            "success": True
+        }
+    
+    # 경쟁사/시장 키워드
+    market_keywords = ["경쟁사", "무신사", "시장", "경쟁", "비교", "트렌드", "리뷰"]
+    if any(keyword in query_lower for keyword in market_keywords):
+        return {
+            "recommended_tool": "market_analyst",
+            "method": "keyword_fallback",
+            "success": True
+        }
+    
+    # 문서 검색 키워드
+    doc_keywords = ["문서", "찾아", "검색", "정책", "가이드", "매뉴얼"]
+    if any(keyword in query_lower for keyword in doc_keywords):
+        return {
+            "recommended_tool": "business_document_search", 
+            "method": "keyword_fallback",
+            "success": True
+        }
+    
+    # 기본값: 패션 분석
     return {
-        "original_analysis": analysis_result,
-        "styled_report": styled_report,
-        "template_documents_used": template_documents or [],
-        "total_template_citations": len(template_citations),
-        "has_styled_report": bool(styled_report)
+        "recommended_tool": "fashion_analyst",
+        "method": "keyword_fallback",
+        "success": True
     }
 
+@mcp.tool(description="Analyze internal business data including sales performance, revenue, customer metrics, operational KPIs, and financial reports. Use this for questions about company's own business performance and internal data.")
+async def fashion_analyst(query: str) -> Dict[str, Any]:
+    """
+    내부 비즈니스 데이터 분석 (매출, 고객 지표, 운영 KPI 등)
+    """
+    description = (
+        "You are a business intelligence analyst specializing in internal company data. "
+        "Use the Text-to-SQL tool to analyze sales, revenue, customer, and operational data. "
+        "Focus on providing actionable business insights from internal company performance data. "
+        "Generate SQL queries that reveal trends, patterns, and key business metrics. "
+        "Provide clear explanations of business performance and strategic recommendations."
+    )
+    return await agent_run_request(
+        query=query,
+        description=description,
+        semantic_model_file=SEMANTIC_MODEL_PATH + 'fashion_streamlit.yaml'
+    )
+
+@mcp.tool(description="Analyze external market data including competitor analysis, market trends, consumer reviews, pricing intelligence, and industry insights. Use this for questions about competitors, market research, and external market intelligence.")
+async def market_analyst(query: str) -> Dict[str, Any]:
+    """
+    외부 시장 데이터 분석 (경쟁사, 시장 트렌드, 소비자 리뷰 등)
+    """
+    description = (
+        "You are a market intelligence analyst specializing in competitor and external market data. "
+        "Use the Text-to-SQL tool to analyze competitor performance, market trends, and consumer insights. "
+        "Focus on providing strategic market intelligence and competitive analysis. "
+        "Generate SQL queries that reveal market opportunities, competitive threats, and consumer preferences. "
+        "Provide actionable insights for competitive strategy and market positioning."
+    )
+    return await agent_run_request(
+        query=query,
+        description=description,
+        semantic_model_file=SEMANTIC_MODEL_PATH + 'fashion_keyword.yaml'
+    )
+
+@mcp.tool(description="Search and analyze documents, reports, policies, and knowledge base content. Use this for finding specific information, guidelines, procedures, or when you need to reference existing documentation.")
+async def business_document_search(query: str, search_filters: Optional[Dict] = None, max_search_results: int = 5) -> Dict[str, Any]:
+    """
+    비즈니스 문서 검색 및 분석 (정책, 가이드라인, 절차 등)
+    """
+    description = (
+        "You are a knowledge management specialist focused on document search and analysis. "
+        "Use the Search tool to find relevant documents, policies, procedures, and reference materials. "
+        "Extract key information and provide comprehensive answers based on documented knowledge. "
+        "Provide clear citations and references to source documents for all information provided."
+    )
+    return await agent_run_request(
+        query=query,
+        description=description,
+        search_table='CORTEX_ANALYST_DEMO.LLM_POC.DOCS_MEETING',
+        search_type='Business Search',
+        search_filters=search_filters,
+        max_search_results=max_search_results
+    )
+
+@mcp.tool(description="Retrieves HR-related documents such as policies, benefits, onboarding, and organizational charts.")
+async def hr_document_search(query: str, search_filters: Optional[Dict] = None, max_search_results: int = 5) -> Dict[str, Any]:
+    """
+    HR 관련 문서 검색 (휴가 정책, 복지, 조직도 등)
+    """
+    description = (
+        "You are an HR specialist focused on employee policies and organizational information. "
+        "Use the Search tool to find relevant HR documents, policies, and employee resources. "
+        "Provide clear guidance based on HR policies and organizational procedures. "
+        "Include relevant policy excerpts and proper citations."
+    )
+    return await agent_run_request(
+        query=query,
+        description=description,
+        search_table='CORTEX_ANALYST_DEMO.LLM_POC.HR_DOCS_MEETING',
+        search_type='HR Search',
+        search_filters=search_filters,
+        max_search_results=max_search_results
+    )
 
 if __name__ == "__main__":
     try:
