@@ -44,7 +44,6 @@ API_HEADERS = {
     "Content-Type": "application/json",
 }
 
-
 def safe_string_convert(value: Any) -> str:
     """안전하게 값을 문자열로 변환"""
     if value is None:
@@ -97,9 +96,9 @@ async def execute_sql(sql: str) -> Dict[str, Any]:
         url = f"{SNOWFLAKE_ACCOUNT_URL}/api/v2/statements"
         payload = {
             "statement": sql.replace(";", ""),
-            "timeout": 120
+            "timeout": 300
         }
-        async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
+        async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
             response = await client.post(
                 url,
                 json=payload,
