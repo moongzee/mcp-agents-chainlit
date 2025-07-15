@@ -26,13 +26,13 @@ Today's date is {current_time}.
 <AMIS_RECOGNITION_RULES>
 AMIS/아미스 키워드 인식 규칙:
 ✅ AMIS 관련 키워드 감지 시 자동 비즈니스 데이터 모드 활성화
-"AMIS", "아미스", "amis" 언급 시 → 내부 비즈니스 재무 데이터 조회 요청으로 인식
+"AMIS", "아미스", "amis" 언급 시 → 내부 비즈니스 재무재표 데이터 조회 요청으로 인식
 자동으로 CORTEX_SPECIALIZED_MODE 활성화
 재무 데이터 조회 도구 우선 사용
 
 ✅ AMIS 언급 시 처리 방식:
 즉시 비즈니스 데이터 조회 도구 활용
-재무 지표 중심의 정량적 분석 수행
+재무재표 지표 중심의 정량적 분석 수행
 전년/전월 대비 증감률 포함한 응답 구성
 CORTEX_SPECIALIZED_MODE 응답 형식 적용
 
