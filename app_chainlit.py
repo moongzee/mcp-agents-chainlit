@@ -114,11 +114,12 @@ async def on_mcp_connect(connection, session: ClientSession):
                 return_messages=True, memory_key="chat_history"
             )
         
-        # Agent core 생성
-        agent_core = llm_setup.create_agent(model_name, all_langchain_tools)
-        cl.user_session.set("agent", agent_core)
+        # Agent core 생성 -> Plan-and-Execute Graph 생성으로 변경
+        prompt_type = cl.user_session.get("prompt_type", "got_deep") # 프롬프트 타입 가져오기
+        graph = llm_setup.create_plan_and_execute_graph(model_name, all_langchain_tools, prompt_type)
+        cl.user_session.set("agent", graph)
 
-        print("[DEBUG] MCP 연결 완료 - 순수 agent 설정됨")
+        print("[DEBUG] MCP 연결 완료 - Plan-and-Execute Graph 설정됨")
 
     except Exception as e:
         error_msg = f"MCP 연결 처리 중 오류가 발생했습니다: {e}"
@@ -223,9 +224,9 @@ async def on_chat_end():
     wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5),
     retry=retry_if_exception_type((HttpxReadError, HttpcoreReadError, ConnectionError, anthropic.APIStatusError, anthropic.APIConnectionError, anthropic.APITimeoutError, TimeoutError))
 )
-async def astream_events_with_retry(agent, messages, config):
-    """강화된 재시도 로직으로 스트림 이벤트 처리"""
-    async for event in agent.astream_events({"messages": messages}, config=config, version="v2"):
+async def astream_events_with_retry(agent, graph_input, config):
+    """강화된 재시도 로직으로 스트림 이벤트 처리 (입력 형식 일반화)"""
+    async for event in agent.astream_events(graph_input, config=config, version="v2"):
         yield event
 
 @cl.on_message
@@ -252,94 +253,87 @@ async def on_message(message: cl.Message):
         await ui_utils.send_error_with_reset_guidance("에이전트가 설정되지 않았습니다.", "일반")
         return
 
-    # 1. 요약 및 메시지 전처리
-    input_data = {"messages": [HumanMessage(content=message.content)]}
-    processed_input = await memory_manager.preprocess_with_silent_summary(input_data, llm_setup.load_system_prompt)
-
-    # 2. 에이전트 실행
-    config = RunnableConfig(recursion_limit=100, thread_id=session_id, callbacks=[cl.LangchainCallbackHandler()])
-    final_msg = cl.Message(content="", author="Assistant")
-    has_streamed, all_responses, table_elements = False, [], None
-    max_retries, retry_count = 3, 0
-
-    while retry_count < max_retries:
-        try:
-            async for event in astream_events_with_retry(agent, processed_input["messages"], config):
-                kind = event["event"]
-                if kind == "on_llm_start" and not final_msg.id: await final_msg.send()
-                elif kind in ("on_llm_stream", "on_chat_model_stream"):
-                    chunk_content = event["data"]["chunk"].content
-                    if isinstance(chunk_content, list): # Gemini 1.5 Pro
-                        chunk_content = "".join(part.get("text", "") for part in chunk_content if part.get("type") == "text")
-                    if chunk_content: await final_msg.stream_token(chunk_content); has_streamed = True
-                elif kind == "on_tool_end":
-                    step = cl.user_session.get(f"tool_step_{event['run_id']}")
-                    output_obj = event["data"].get("output")
-                    raw_content = output_obj.content if isinstance(output_obj, ToolMessage) else None
-                    json_str = None
-                    if isinstance(raw_content, CallToolResult):
-                        json_str = next((c.text for c in raw_content.content if isinstance(c, TextContent)), None)
-                    elif isinstance(raw_content, str):
-                        match = re.search(r"text='(.*?)'", raw_content, re.DOTALL)
-                        if match: json_str = match.group(1)
-                    
-                    if step: step.output = json_str or str(raw_content)
-
-                    if event["name"] == "run_cortex_agents" and json_str:
-                        try:
-                            unescaped = codecs.decode(json_str, "unicode_escape").encode("latin1").decode("utf-8")
-                            data = json.loads(unescaped).get("results", {})
-                            if data.get("data"):
-                                cols = [c["name"] for c in data["resultSetMetaData"]["rowType"]]
-                                df = pd.DataFrame(data["data"], columns=cols)
-                                csv_bytes = df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-                                table_elements = [
-                                    cl.Dataframe(data=df, name="상세 데이터", display="inline"),
-                                    cl.File(name=f"report_{datetime.now():%Y%m%d_%H%M%S}.csv", content=csv_bytes, display="inline")
-                                ]
-                        except Exception as e: print(f"툴 결과 처리 오류: {e}\n{traceback.format_exc()}")
-                    if step: await step.update()
-                elif kind in ("on_llm_end", "on_chat_model_end"):
-                    output = event["data"].get("output")
-                    if output:
-                        content = output.content if hasattr(output, 'content') else ""
-                        if isinstance(content, list): content = "".join(p.get("text", "") for p in content if p.get("type")=="text")
-                        if content: all_responses.append(content)
-            break
-        except (HttpxReadError, HttpcoreReadError, ConnectionError) as e:
-            retry_count += 1
-            if retry_count < max_retries:
-                await asyncio.sleep(2 ** retry_count)
-                await cl.Message(content=f"🔄 네트워크 연결이 불안정하여 재시도합니다... ({retry_count}/{max_retries})").send()
-            else: await ui_utils.send_error_with_reset_guidance("네트워크가 불안정하여 응답할 수 없습니다.", "네트워크"); return
-        except (anthropic.APIStatusError, ServiceUnavailable) as e:
-            msg, err_type = ("서버 과부하 상태입니다.", "API")
-            if isinstance(e, ServiceUnavailable) and not ("overloaded" in str(e) or "503" in str(e)):
-                msg, err_type = (f"API 오류: {e}", "API")
-            await ui_utils.send_error_with_reset_guidance(msg, err_type); return
-        except (MemoryError, RecursionError) as e:
-            err_type = "메모리" if isinstance(e, MemoryError) else "복잡도"
-            await ui_utils.send_error_with_reset_guidance(f"{err_type} 문제로 처리할 수 없습니다.", "메모리"); return
-        except Exception as e:
-            print(f"[DEBUG] 예상치 못한 오류: {e}\n{traceback.format_exc()}")
-            await ui_utils.send_critical_error_guidance(); return
-
-    if table_elements:
-        await cl.Message(content="📊 **데이터 결과**", elements=table_elements).send()
-
-    # 3. 최종 응답 및 메모리 저장
-    final_response = final_msg.content.strip()
-    if not has_streamed and all_responses: final_response = "\n\n".join(all_responses)
-    if not final_response:
-        await ui_utils.send_error_with_reset_guidance("응답 생성에 실패했습니다.", "일반"); return
+    # 1. Plan-and-Execute 그래프 입력 준비
+    graph_input = {"input": message.content}
     
-    await final_msg.update()
+    # 2. 그래프 실행 및 UI 렌더링
+    config = RunnableConfig(recursion_limit=100, thread_id=session_id, callbacks=[cl.LangchainCallbackHandler()])
+    
+    final_response = None
+    plan_msg = None
+    agent_step = None # 현재 실행 중인 에이전트 스텝을 추적
 
     try:
-        db_utils.save_message(session_id, "assistant", final_response)
-        if session_id in memory_manager.session_memory_store:
-            memory = memory_manager.session_memory_store[session_id]
-            memory.save_context({"input": message.content.strip()}, {"output": final_response})
-            print(f"[DEBUG] 대화 저장 완료. 메모리 크기: {len(memory.load_memory_variables({})['chat_history'])}개")
+        async for event in astream_events_with_retry(agent, graph_input, config):
+            kind = event["event"]
+            name = event["name"]
+
+            if kind == "on_chain_start":
+                if name == "planner":
+                    pass
+                    #await cl.Message(content="🤔 **계획 수립 중...**", author="System").send()
+                elif name == "agent":
+                    plan = event["data"].get("input", {}).get("plan", [])
+                    if plan:
+                        task = plan[0]
+                        agent_step = cl.Step(name=f"🚀 실행: {task}", type="run")
+                        await agent_step.send()
+                elif name == "replan":
+                    if agent_step:
+                        await agent_step.remove() # 이전 에이전트 스텝 UI 정리
+                        agent_step = None
+                    #await cl.Message(content="🔄 **계획 검토 및 다음 단계 준비 중...**", author="System").send()
+
+            elif kind == "on_chain_end":
+                if name == "planner":
+                    plan = event["data"].get("output", {}).get("plan", [])
+                    plan_text = "\n".join(f"- {step}" for step in plan)
+                    plan_msg = cl.Message(content=f"**📝 계획:**\n{plan_text}", author="System")
+                    await plan_msg.send()
+                elif name == "agent":
+                     if agent_step:
+                        result = event["data"].get("output", {}).get("past_steps", [("", "")])[-1][1]
+                        agent_step.output = result
+                        await agent_step.update()
+                elif name == "replan":
+                    output = event["data"].get("output", {})
+                    if "response" in output:
+                        final_response = output["response"]
+                    elif "plan" in output and plan_msg:
+                        new_plan = output["plan"]
+                        if not new_plan: # new_plan이 비어있으면 마지막 단계였다는 의미
+                            pass
+                        else:
+                            plan_text = "\n".join(f"- {step}" for step in new_plan)
+                            plan_msg.content = f"📝 **다음 계획:**\n{plan_text}"
+                            await plan_msg.update()
+    
+    except (HttpxReadError, HttpcoreReadError, ConnectionError) as e:
+        await ui_utils.send_error_with_reset_guidance("네트워크가 불안정하여 응답할 수 없습니다.", "네트워크"); return
+    except (anthropic.APIStatusError, ServiceUnavailable) as e:
+        msg, err_type = ("서버 과부하 상태입니다.", "API")
+        if isinstance(e, ServiceUnavailable) and not ("overloaded" in str(e) or "503" in str(e)):
+            msg, err_type = (f"API 오류: {e}", "API")
+        await ui_utils.send_error_with_reset_guidance(msg, err_type); return
+    except (MemoryError, RecursionError) as e:
+        err_type = "메모리" if isinstance(e, MemoryError) else "복잡도"
+        await ui_utils.send_error_with_reset_guidance(f"{err_type} 문제로 처리할 수 없습니다.", "메모리"); return
     except Exception as e:
-        print(f"[DEBUG] 최종 응답 저장 실패: {e}")
+        print(f"[DEBUG] 예상치 못한 오류: {e}\n{traceback.format_exc()}")
+        await ui_utils.send_critical_error_guidance(); return
+    
+    if agent_step: await agent_step.remove()
+
+    # 3. 최종 응답 및 메모리 저장
+    if final_response:
+        await cl.Message(content=final_response, author="Assistant").send()
+        try:
+            db_utils.save_message(session_id, "assistant", final_response)
+            if session_id in memory_manager.session_memory_store:
+                memory = memory_manager.session_memory_store[session_id]
+                memory.save_context({"input": message.content.strip()}, {"output": final_response})
+                print(f"[DEBUG] 대화 저장 완료. 메모리 크기: {len(memory.load_memory_variables({})['chat_history'])}개")
+        except Exception as e:
+            print(f"[DEBUG] 최종 응답 저장 실패: {e}")
+    else:
+        await ui_utils.send_error_with_reset_guidance("응답 생성에 실패했습니다.", "일반"); return

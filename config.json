@@ -1,11 +1,4 @@
 {
-  "cortex-agents": {
-    "command": "python",
-    "args": [
-      "mcp_servers/cortex_agents.py"
-    ],
-    "transport": "stdio"
-  },
   "google-calendar": {
     "command": "docker",
     "args": [
@@ -13,6 +6,13 @@
       "--rm",
       "-i",
       "mcp/google-calendar"
+    ],
+    "transport": "stdio"
+  },
+  "cortex-agents": {
+    "command": "python",
+    "args": [
+      "mcp_servers/cortex_agents.py"
     ],
     "transport": "stdio"
   },
