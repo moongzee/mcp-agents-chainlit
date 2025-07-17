@@ -9,6 +9,59 @@
 - 사용자 정보 및 대화 기록 관리를 위한 SQLite DB 사용
 - 모듈화된 코드 구조 (`utils` 디렉터리)
 
+## LangGraph 워크플로우 구조
+
+이 프로젝트는 사용자 입력에 따라 동적으로 라우팅되는 Plan-and-Execute 패턴을 구현한 LangGraph 워크플로우를 사용합니다.
+
+```mermaid
+flowchart TD
+    START([START]) --> IR[Initial Router<br/>사용자 입력 분석]
+    
+    IR --> |routing_mode 설정| PLANNER[Planner<br/>계획 수립]
+    
+    PLANNER --> |계획 생성 성공| AGENT[Agent<br/>ReAct 에이전트 실행]
+    PLANNER --> |계획 생성 실패| REPLAN[Replanner<br/>계획 수정 또는 최종 답변]
+    
+    AGENT --> |단계 실행 완료| REPLAN
+    
+    REPLAN --> |계획 남음| AGENT
+    REPLAN --> |최종 답변 생성| END([END])
+    
+    %% 라우팅 모드별 처리
+    subgraph "라우팅 모드"
+        GENERAL[General Mode<br/>일반적인 질문 처리]
+        FEEDBACK[Feedback Report Mode<br/>정량 피드백 요청]
+        CORTEX[Cortex Mode<br/>Snowflake/Cortex 도구 사용]
+    end
+    
+    %% 조건부 분기 설명
+    IR -.-> |"정량" 키워드 포함| FEEDBACK
+    IR -.-> |일반 질문| GENERAL
+    AGENT -.-> |cortex 도구 사용 시| CORTEX
+    
+    %% 스타일링
+    classDef startEnd fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
+    classDef process fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef mode fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    
+    class START,END startEnd
+    class IR,PLANNER,AGENT,REPLAN process
+    class GENERAL,FEEDBACK,CORTEX mode
+```
+
+### 워크플로우 주요 구성 요소
+
+- **Initial Router**: 사용자 입력 분석 및 라우팅 모드 설정 (`"정량"` 키워드 감지)
+- **Planner**: 라우팅 모드별 동적 프롬프트를 적용한 5단계 실행 계획 수립
+- **Agent**: LangChain 도구를 활용한 ReAct 에이전트로 계획 단계 실행
+- **Replanner**: 계획 수정 또는 라우팅 모드별 특화된 최종 답변 생성
+
+### 라우팅 모드
+
+- **General Mode**: 일반적인 질문 처리
+- **Feedback Report Mode**: 비즈니스 정량 피드백 보고서 생성 (정규화된 지표 형식 적용)
+- **Cortex Mode**: Snowflake/Cortex 환경 특화 처리 (데이터 조회 기준 자동 인식)
+
 ## 프로젝트 구조
 
 ```
