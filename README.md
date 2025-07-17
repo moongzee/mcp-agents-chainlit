@@ -1,89 +1,107 @@
 # MCP Agents Chainlit MVP Prototype
 
-이 프로젝트는 MCP 플랫폼 기반의 Chainlit MVP 프로토타입입니다.  
-아직 리팩토링이 진행 중이며, 코드 구조 및 기능이 변경될 수 있습니다.
+이 프로젝트는 MCP 플랫폼 기반의 Chainlit MVP 프로토타입입니다.
 
 ## 주요 특징
 
-- Chainlit, LangChain, LangGraph 등 최신 LLM 프레임워크 활용
-- MCP 플랫폼 연동
-- 데이터 처리 및 모델 설정을 위한 다양한 패키지 사용
+- Chainlit, LangChain, LangGraph 등 LLM 프레임워크 활용
+- MCP 플랫폼 연동 (Snowflake Cortex)
+- 사용자 정보 및 대화 기록 관리를 위한 SQLite DB 사용
+- 모듈화된 코드 구조 (`utils` 디렉터리)
 
-## 시스템 구성 요소
+## 프로젝트 구조
+
 ```
-+------------------+
-|      User        |
-+--------+---------+
-         |
-         v
-+-------------------------+
-| LangGraph ReAct Agent  |
-|    (app_chainlit.py)   |
-+-----------+-------------+
-            |
-            | Reads / Writes
-            v
-+---------------------------+
-|         SQLite DB         |
-|  - User Info              |
-|  - Memory / History       |
-+---------------------------+
-
-            |
-            | Loads system prompts
-            v
-+---------------------------+
-|     system_prompt.txt     |
-+---------------------------+
-
-            |
-            | LLM API Calls
-            v
-+-----------------------------+
-| Snowflake Cortex MCP Agent |
-+-----------------------------+
-
-            |
-            v
-+----------------------------+
-|     Docker Container       |
-|  - Runs all above modules  |
-|  - API exposed via port    |
-+----------------------------+
+mcp-agents-chainlit/
+├── .chainlit/
+├── mcp_servers/
+│   ├── cortex_agents.py
+│   └── korea_weather.py
+├── prompt/
+│   ├── system_prompt_general.txt
+│   └── system_prompt_got_deep.txt
+├── public/
+│   ├── custom.css
+│   ├── custom.js
+│   ├── logo_dark.png
+│   └── logo_light.png
+├── utils/
+│   ├── db_utils.py
+│   ├── llm_setup.py
+│   ├── memory_manager.py
+│   └── ui_utils.py
+├── .dockerignore
+├── .gitignore
+├── add_user.py
+├── app_chainlit.py
+├── chainlit.md
+├── chat_history.db
+├── config.json
+├── docker-compose.yaml
+├── Dockerfile
+├── environment.yaml
+├── README.md
+├── requirements.txt
+└── simple_db_viewer.py
 ```
 
+## 시스템 구성 요소 및 설명
 
+*   **`app_chainlit.py`**: Chainlit 기반의 메인 애플리케이션 파일입니다. LangGraph ReAct Agent를 사용하여 사용자 입력을 처리합니다.
+*   **`config.json`**: LLM 모델, 사용자 정보 등 주요 설정을 관리하는 파일입니다.
+*   **`add_user.py`**: SQLite DB에 신규 사용자를 추가하는 스크립트입니다.
+*   **`simple_db_viewer.py`**: SQLite DB의 내용을 간단하게 조회할 수 있는 스크립트입니다.
+*   **`chat_history.db`**: 사용자 정보와 대화 기록을 저장하는 SQLite 데이터베이스 파일입니다.
+
+*   **`prompt/`**: 시스템 프롬프트 파일을 저장하는 디렉터리입니다.
+    *   `system_prompt_general.txt`: 일반적인 대화를 위한 시스템 프롬프트입니다.
+    *   `system_prompt_got_deep.txt`: 심층적인 분석이나 작업 수행을 위한 시스템 프롬프트입니다.
+
+*   **`utils/`**: 기능별로 모듈화된 유틸리티 스크립트를 관리하는 디렉터리입니다.
+    *   `db_utils.py`: 데이터베이스 관련 유틸리티 함수를 포함합니다.
+    *   `llm_setup.py`: LangChain 및 LangGraph 모델 설정을 담당합니다.
+    *   `memory_manager.py`: 대화 기록 관리를 위한 메모리 관련 함수를 포함합니다.
+    *   `ui_utils.py`: Chainlit UI 관련 유틸리티 함수를 포함합니다.
+
+*   **`mcp_servers/`**: MCP Agent 서버 관련 스크립트를 포함합니다.
+    *   `cortex_agents.py`: Snowflake Cortex 기반의 에이전트 코드입니다.
+    *   `korea_weather.py`: (예시) 날씨 정보 제공 에이전트 코드입니다.
+
+*   **`public/`**: Chainlit UI 커스터마이징을 위한 정적 파일(CSS, JS, 이미지)을 포함합니다.
+
+*   **Docker 관련 파일**:
+    *   `Dockerfile`: 애플리케이션 실행을 위한 Docker 이미지를 빌드합니다.
+    *   `docker-compose.yaml`: Docker 컨테이너 실행을 위한 설정을 관리합니다.
+    *   `.dockerignore`: Docker 이미지 빌드 시 제외할 파일 및 디렉터리를 지정합니다.
 
 ## 설치 방법
 
-1. 저장소 클론
-2. **Python 3.11** 환경 준비
-3. 패키지 설치
-   ```bash
-   pip install -r requirements.txt
-   ```
+1.  저장소 클론
+2.  **Python 3.11** 환경 준비
+3.  필요한 패키지 설치
+    ```bash
+    pip install -r requirements.txt
+    ```
 
 ## 실행 방법
 
-1. 프로젝트 디렉토리로 이동
-2. 아래 명령어로 Chainlit 서버 실행
-   ```bash
-   chainlit run [실행할_파이썬_파일].py
-   ```
-   (예시: chainlit run main.py --port 8000)
-3. 웹 브라우저에서 [http://localhost:8000](http://localhost:8000) 접속
+1.  `config.json` 파일에 연동할 MCP서버 정보를 입력합니다.
+2.  프로젝트 루트 디렉토리에서 아래 명령어를 실행하여 Chainlit 서버를 시작합니다.
+    ```bash
+    chainlit run app_chainlit.py --port 8000
+    ```
+3.  웹 브라우저에서 `http://localhost:8000` 주소로 접속합니다.
 
 ## 사용자 추가 방법
 
-- 사용자를 추가하려면 반드시 add_user 파일(스크립트)을 사용해야 합니다.
-- add_user 파일의 사용법은 해당 파일 내 주석 또는 도움말을 참고하세요.
+-   새로운 사용자를 추가하려면 `add_user.py` 스크립트를 사용해야 합니다.
+    ```bash
+    python add_user.py --id [사용자 ID] --name "[사용자 이름]" --org "[소속]"
+    ```
+-   자세한 사용법은 `python add_user.py --help` 명령어로 확인할 수 있습니다.
 
-## 리팩토링 안내
+## 참고
 
-- 현재 코드베이스는 리팩토링이 예정되어 있습니다.
-- 구조, 함수명, 사용법 등이 변경될 수 있으니 참고 바랍니다.
-- 최신 사용법 및 변경사항은 README와 코드 주석을 확인해 주세요.
-
-## 문의
-
-- 개선사항, 버그 제보 등은 고객의 생소리함 접수 plz
+-   이 프로젝트는 계속해서 개선되고 있으며, 코드 구조나 기능이 변경될 수 있습니다.
+-   최신 변경 사항은 `git log`와 코드 내 주석을 참고해주세요.
+-   개선 제안이나 버그 발견 시 이슈를 등록해주시면 감사하겠습니다.

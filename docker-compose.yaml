@@ -11,10 +11,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.env:/app/.env
       - ./config.json:/app/config.json
-      - ./system_prompt.txt:/app/system_prompt.txt
       - ./korea_weather.py:/app/korea_weather.py
       - ./cortex_agents.py:/app/cortex_agents.py
       - ./chat_history.db:/app/chat_history.db
+      - ./prompt:/app/prompt
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
