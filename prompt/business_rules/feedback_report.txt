@@ -1,4 +1,4 @@
-<AMIS_FEEDBACK_REQUEST_RULES>
+<BUSINESS_RULES>
 ✅ 지표 매핑 규칙:
 - 외형매출 → `영업매출`
 - 영업이익 → `영업이익`
@@ -35,4 +35,4 @@
 - 수치 환각, 추정, 예시 생성 절대 금지
 - 목표 대비 수치를 도구 결과 없이 생성 금지
 - 지표 누락 시 응답에서 은폐 금지 — 반드시 `"데이터 없음"`으로 표시
-</AMIS_FEEDBACK_REQUEST_RULES> 
+</BUSINESS_RULES> 
