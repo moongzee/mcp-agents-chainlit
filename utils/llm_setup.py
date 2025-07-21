@@ -3,6 +3,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
 from datetime import datetime, timezone, timedelta
 import re
+import json
 
 # --- Plan-and-Execute 관련 추가 임포트 ---
 import operator
@@ -11,7 +12,30 @@ from typing_extensions import TypedDict
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
-# ---
+
+
+# --- 설정 파일 로드 ---
+def load_routing_config(config_path="prompt/routing_config.json"):
+    """JSON 설정 파일을 로드합니다."""
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Error loading config file: {e}")
+        # 설정 파일 로드 실패 시 비상용 기본값
+        return {}
+ROUTING_CONFIG = load_routing_config()
+
+def load_file_content(file_path: str) -> str:
+    """주어진 경로의 파일 내용을 읽어 반환합니다."""
+    if not file_path:
+        return ""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        print(f"Warning: File not found at {file_path}")
+        return ""
 
 def load_system_prompt(prompt_type: str) -> str:
     """프롬프트 타입에 따라 시스템 프롬프트를 로드합니다."""
@@ -53,94 +77,6 @@ def parse_system_prompt(prompt_content: str) -> dict:
                 content = content.split('----')[0].strip()
             sections[tag] = f"<{tag}>\n{content}\n</{tag}>"
     return sections
-
-# --- 조건부 라우팅을 위한 규칙 정의 이거 따로 어딘가 관리 필요 ( 비즈니스 로직과 비즈니스 포맷 정의 용 ) 
-CORTEX_SPECIALIZED_MODE = """
-<CORTEX_SPECIALIZED_MODE>
-**Cortex/Snowflake 환경 감지 시 특화 모드 활성화**
-✅ 데이터 조회 기준
-
-1. **지표 기준일 자동 인식**: 사용자가 "전년", "전월" 등을 명시하면 시계열 필터 반영.
-2. **지표 구성 방식**: 모든 정량 지표는 `지표명 + 수치 + 기준 대비 증감` 형식으로 조회.
-3. **지표 단위 정규화**: 금액은 억 단위 정수, 비율은 소수점 1자리 %로 표현.
-4. **예측/시뮬레이션 데이터**: 과거 데이터 기반 추정치 사용 및 달성률/편차액으로 정량 표현.
-5. **정량/정성 피드백 분리 조회**: Survey/고객 의견 조회 시 수치와 텍스트 코멘트 분리 추출.
-
-🚫 데이터 신뢰성 원칙: 임의 수치 생성 금지, 조회된 데이터만 사용, 결과 없을 시 "해당 데이터 없음" 명시.
-</CORTEX_SPECIALIZED_MODE>
-"""
-FEEDBACK_REPORT_RULES = """
-<AMIS_FEEDBACK_REQUEST_RULES>
-✅ 지표 매핑 규칙:
-- 외형매출 → `영업매출`
-- 영업이익 → `영업이익`
-- 매총익 → `매출총이익`
-- 매총율 → `매출총이익 / 영업매출`
-- 판관비 → `판매관리비`
-- 판관비율 → `판매관리비 / 영업매출`
-
-✅ 응답 구조 강제:
-- 반드시 <BUSINESS_REPORT_FORMAT> 형식 유지
-- 소수점 1자리로 정규화
-- 누락 데이터는 “데이터 없음” 명시
-
-✅ 지표 단위 정규화:
-- 금액 → 억 단위 정수
-- 비율 → 소수점 1자리 `%` 표기
-- 비율 변화량 → `%p` (퍼센트포인트) 표기
-
-✅ 필수 비교 대상 포함 규칙:
-- **모든 정량 지표는 반드시 아래 세 항목을 포함해야 함**:
-  1. **당월 수치**
-  2. **전월 대비 증감량 또는 증감률**
-  3. **목표 대비 달성률 또는 편차**
-- 예시:
-  - `"외형매출 122억(전년동월대비 +6.2%, 목표대비 97% 달성)"`
-  - `"판관비율 15.2%(전년동월대비 -0.3%p, 목표대비 +0.5%p)"`
-
-✅ 표현 방식:
-- 증감량은 `±X%`, `±X억`, `±X%p` 등으로 표현
-- 목표대비 항목은 `XX% 달성`, `목표대비 ±X억/±X%p` 형태로 명시
-- 두 가지 비교(전년동월, 목표) 모두 없으면 **불완전 응답으로 간주**
-
-🚫 금지:
-- 수치 환각, 추정, 예시 생성 절대 금지
-- 목표 대비 수치를 도구 결과 없이 생성 금지
-- 지표 누락 시 응답에서 은폐 금지 — 반드시 `"데이터 없음"`으로 표시
-</AMIS_FEEDBACK_REQUEST_RULES>
-----
-<BUSINESS_REPORT_FORMAT>
-When User requets "X월 정량 피드백" or similar business report format, use this structure:
-
-## [브랜드명] X 월 정량 피드백
-### X 월 당월 외형매출 XXX억(전년동월대비 ±X%), 영업이익 XXX억(전년동월대비 ±XX억)
-
-**1. [매출] 오프라인 XX억(전년동월대비 ±X%, XX% 목표달성) / 온라인 XX억(전년동월대비 ±X%, XX% 목표달성) 
-- [오프라인/온라인 매출에 대한 전월 대비 매출동향 한줄 요약내용] 
-
-**2. [매총익] XX억(전년동월대비 ±X%, XX% 목표달성) / 매총율 XX%(전년동월대비 ±X%p, 목표대비 ±X%p)
-- [매출액과 매출원가 관련하여 한줄 분석 요약 내용]
-
-**3. [판관비] XX억(전년동월대비 ±X%, XX% 목표달성) / 판관비율 XX%(전년동월대비 ±X%p, 목표대비 ±X%p)
-- [판관비 항목중 비중이 높은 것에 대해 두줄 분석 요약 내용]
-
-### 브랜드 X월 AMIS 데이터  
-| 항목     | 금액 (억원)|
-|----------|-----------|
-|매출액     |      XX 억|
-|매출원가    |     XX 억| 
-|매출총이익  |     XX 억|
-|영업이익    |     XX 억|
-|당기순이익  |     XX 억|
-|판매관리비  |     XX 억|
-
-**📝 FORMATTING RULES:**
-- ✅ 모든 금액은 억 단위, 비율은 % 혹은 %p로 정규화.
-- ✅ 모든 지표는 ‘전년동월대비’, ‘목표대비’ 수치를 반드시 포함.
-- ✅ 데이터 누락 시 “데이터 없음”으로 명시.
-- ✅ **CRITICAL**: 절대로 데이터를 임의로 만들지 말 것.
-</BUSINESS_REPORT_FORMAT>
-"""
 
 # --- Plan-and-Execute 상태 및 모델 정의 ---
 class PlanExecute(TypedDict):
@@ -224,7 +160,10 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
     # 4. 그래프 노드 정의
     async def initial_router(state: PlanExecute):
         """사용자 입력에 따라 초기 라우팅 모드를 설정합니다."""
-        if "정량" in state["input"]:
+        # 사용자의 입력에서 공백을 제거하여 "정량피드백" 키워드를 유연하게 감지
+        normalized_input = state["input"].replace(" ", "")
+        if "정량피드백" in normalized_input:
+            print("[DEBUG] '정량 피드백' 키워드 감지. 라우팅 모드를 'feedback_report'로 설정합니다.")
             mode = "feedback_report"
         else:
             mode = "general"
@@ -264,14 +203,29 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
         # 기본 사용자 프롬프트
         user_prompt_template = "주어진 목표에 대해 5단계별 계획을 세워주세요. 마지막은 값이 맞는지 검증단계로 구성해주세요.: {input}"
 
-        # '정량 피드백' 모드일 경우 프롬프트 강화
-        if state.get("routing_mode") == "feedback_report":
-            print("[DEBUG] '정량 피드백' 모드로 Planner를 구성합니다.")
-            system_prompt_parts.append(FEEDBACK_REPORT_RULES)
-            system_prompt_parts.append(
-                "위의 '정량 피드백' 규칙과 '비즈니스 리포트 형식'을 참고하여, 보고서 작성에 필요한 모든 데이터를 수집하기 위한 상세하고 구체적인 실행 계획을 세워주세요. "
-                "마지막 단계는 값이 맞는지 검증단계로 구성해주세요."
-            )
+        # 라우팅 모드에 따라 Planner 프롬프트 강화
+        routing_mode = state.get("routing_mode", "general")
+        config = ROUTING_CONFIG.get(routing_mode, ROUTING_CONFIG["general"])
+        
+        business_rule_paths = config.get("planner_business_rules", [])
+        all_rules_content = [load_file_content(path) for path in business_rule_paths if path]
+
+        # CONFIG 설정에 따라, planner가 응답 형식을 참고할지 결정
+        if config.get("add_response_format_to_planner", False):
+            response_format_content = load_file_content(config["response_format"])
+            if response_format_content:
+                print(f"[DEBUG] {routing_mode} 모드: 응답 포맷을 Planner에게 전달합니다.")
+                all_rules_content.append(response_format_content)
+
+        if any(all_rules_content):
+            print(f"[DEBUG] '{routing_mode}' 모드로 Planner를 구성합니다.")
+            system_prompt_parts.extend(filter(None, all_rules_content))
+
+            # CONFIG에서 Planner 최종 지시사항 가져오기
+            final_instruction = config.get("planner_final_instruction")
+            if final_instruction:
+                system_prompt_parts.append(final_instruction)
+                
             user_prompt_template = "다음 사용자 요청에 대한 실행 계획을 수립하세요: {input}"
         
         final_system_prompt = "\n".join(part for part in system_prompt_parts if part)
@@ -293,24 +247,33 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
 
     async def replan_step(state: PlanExecute):
         """실행 결과를 바탕으로 계획을 수정하거나 최종 답변을 생성합니다."""
-        # cortex-agents 도구 사용 여부 확인
-        if any(step[2] in ["fashion_analyst", "market_analyst"]  for step in state["past_steps"]):
-            state["routing_mode"] = "cortex"
-
+        
         # 최종 응답 생성 단계인지 확인
-        # 간단한 로직: 계획이 1개 남았고, 실행 후 최종 답변을 해야 할 때
         if len(state["plan"]) == 1:
-            # 현재 상태와 라우팅 모드에 기반하여 동적 프롬프트 생성
-            final_prompt_parts = [prompt_sections.get("ROLE", ""), prompt_sections.get("OUTPUT_FORMAT", "")]
-            if state["routing_mode"] == "feedback_report":
-                final_prompt_parts.append(FEEDBACK_REPORT_RULES)
-            elif state["routing_mode"] == "cortex":
-                final_prompt_parts.append(CORTEX_SPECIALIZED_MODE)
+            routing_mode = state.get("routing_mode", "general")
+            config = ROUTING_CONFIG.get(routing_mode, ROUTING_CONFIG["general"])
             
-            final_prompt_str = "\n".join(part for part in final_prompt_parts if part) # None이 아닌 경우에만 join
+            # 1. 기본 시스템 프롬프트 및 라우팅에 따른 응답 형식 로드
+            final_prompt_parts = [
+                prompt_sections.get("ROLE", ""),
+                load_file_content(config["response_format"])
+            ]
+            
+            # 2. Cortex 도구 사용이 감지되면, 최종 응답 생성 시 Cortex 규칙을 동적으로 추가
+            is_cortex_tool_used = any(step[2] in ["fashion_analyst", "market_analyst"] for step in state["past_steps"])
+            if is_cortex_tool_used:
+                print("[DEBUG] Cortex 도구 사용 감지. Cortex 규칙을 최종 응답 생성에 적용합니다.")
+                cortex_rules = load_file_content("prompt/business_rules/cortex.txt")
+                if cortex_rules:
+                    final_prompt_parts.append(cortex_rules)
+            
+            # 3. CONFIG에서 사용자 프롬프트 템플릿 가져오기
+            user_prompt_template = config["replanner_user_prompt"]
+
+            final_prompt_str = "\n".join(part for part in final_prompt_parts if part)
             final_prompt = ChatPromptTemplate.from_messages([
                 ("system", final_prompt_str),
-                ("user", "다음 정보를 바탕으로 최종 보고서를 작성해주세요.\n\n사용자 질문: {input}\n\n지금까지의 작업 내역:\n{past_steps}")
+                ("user", user_prompt_template)
             ])
             
             # 최종 답변 생성
