@@ -31,7 +31,9 @@ flowchart TD
     AGENT --> REPLAN[Replanner<br/>계획 수정 / 최종 답변]
 
     PROMPT_FILES -- "Replanner 형식 적용" --> REPLAN
-    AGENT -- "Cortex 규칙 동적 적용 (도구 사용 시)" --.-> REPLAN
+    
+    %% Cortex 도구 사용 시, Replanner에 Cortex 규칙을 동적으로 적용
+    AGENT -. "Cortex 규칙 적용" .-> REPLAN
     
     REPLAN --> |계획 남음| AGENT
     REPLAN --> |최종 답변 생성| END([END])
