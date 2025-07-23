@@ -3,8 +3,8 @@
     "planner_business_rules": [],
     "response_format": "prompt/response_formats/general.txt",
     "add_response_format_to_planner": false,
-    "planner_final_instruction": "위의 규칙들을 모두 참고하여, 보고서 작성에 필요한 모든 데이터를 수집하기 위한 상세하고 구체적인 실행 계획을 세워주세요. 마지막 단계는 값이 맞는지 검증단계로 구성해주세요.",
-    "replanner_user_prompt": "다음 정보를 바탕으로 최종 보고서를 작성해주세요.\\n\\n사용자 질문: {input}\\n\\n지금까지의 작업 내역:\\n{past_steps}"
+    "planner_final_instruction": "",
+    "replanner_user_prompt": "다음 정보를 바탕으로 최종답변을 작성해주세요.\\n\\n사용자 질문: {input}\\n\\n지금까지의 작업 내역:\\n{past_steps}"
   },
   "feedback_report": {
     "planner_business_rules": [

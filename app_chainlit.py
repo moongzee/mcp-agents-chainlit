@@ -13,7 +13,7 @@ import time
 import asyncio
 import re
 import codecs
-from typing import Any, List
+from typing import Any, List, Optional
 
 # --- 2. MCP 및 Langchain 관련 타입 임포트 ---
 from mcp import ClientSession
@@ -115,7 +115,7 @@ async def on_mcp_connect(connection, session: ClientSession):
             )
         
         # Agent core 생성 -> Plan-and-Execute Graph 생성으로 변경
-        prompt_type = cl.user_session.get("prompt_type", "got_deep") # 프롬프트 타입 가져오기
+        prompt_type = cl.user_session.get("prompt_type", "general") # 프롬프트 타입 가져오기
         graph = llm_setup.create_plan_and_execute_graph(model_name, all_langchain_tools, prompt_type)
         cl.user_session.set("agent", graph)
 
@@ -147,8 +147,8 @@ def load_mcp_servers_from_config():
 async def chat_profiles():
     """다양한 모델과 프롬프트 조합의 챗 프로필 설정"""
     return [
-        cl.ChatProfile(name="Claude 4 + GoT deep", markdown_description="Claude Sonnet 4 + GoT 방법론 프롬프트 (Deep)"),
         cl.ChatProfile(name="Claude 4 + General", markdown_description="Claude Sonnet 4 + 일반 프롬프트"),
+        cl.ChatProfile(name="Claude 4 + GoT deep", markdown_description="Claude Sonnet 4 + GoT 방법론 프롬프트 (Deep)"),
         cl.ChatProfile(name="Claude 3.7 + GoT deep", markdown_description="Claude 3.7 Sonnet + GoT 방법론 프롬프트 (Deep)"),
         cl.ChatProfile(name="Claude 3.7 + General", markdown_description="Claude 3.7 Sonnet + 일반 프롬프트"),
         cl.ChatProfile(name="Gemini 2.5 Pro + GoT deep", markdown_description="Gemini 2.5 Pro + GoT 방법론 프롬프트 (Deep)"),
@@ -161,8 +161,8 @@ async def chat_profiles():
 async def on_chat_start():
     """채팅 시작 시 모델, 프롬프트, MCP 연결 설정"""
     profile_map = {
-        "Claude 4 + GoT deep": ("claude-sonnet-4-20250514", "got_deep"),
         "Claude 4 + General": ("claude-sonnet-4-20250514", "general"),
+        "Claude 4 + GoT deep": ("claude-sonnet-4-20250514", "got_deep"),
         "Claude 3.7 + GoT deep": ("claude-3-7-sonnet-latest", "got_deep"),
         "Claude 3.7 + General": ("claude-3-7-sonnet-latest", "general"),
         "Gemini 2.5 Flash + GoT deep": ("gemini-2.5-flash", "got_deep"),
@@ -170,8 +170,8 @@ async def on_chat_start():
         "Gemini 2.5 Pro + GoT deep": ("gemini-2.5-pro", "got_deep"),
         "Gemini 2.5 Pro + General": ("gemini-2.5-pro", "general"),
     }
-    chat_profile = cl.user_session.get("chat_profile", "Claude 4 + GoT deep")
-    model_name, prompt_type = profile_map.get(chat_profile, profile_map["Claude 4 + GoT deep"])
+    chat_profile = cl.user_session.get("chat_profile", "Claude 4 + General")
+    model_name, prompt_type = profile_map.get(chat_profile, profile_map["Claude 4 + General"])
 
     cl.user_session.set("model_name", model_name)
     cl.user_session.set("prompt_type", prompt_type)
@@ -253,8 +253,19 @@ async def on_message(message: cl.Message):
         await ui_utils.send_error_with_reset_guidance("에이전트가 설정되지 않았습니다.", "일반")
         return
 
-    # 1. Plan-and-Execute 그래프 입력 준비
-    graph_input = {"input": message.content}
+    # 1. Plan-and-Execute 그래프 입력 준비 (대화 기록 추가)
+    memory = memory_manager.session_memory_store.get(session_id)
+    chat_history = []
+    if memory:
+        # ConversationBufferMemory에서 BaseMessage 객체 리스트를 직접 가져옵니다.
+        chat_history = memory.load_memory_variables({}).get("chat_history", [])
+
+    # chat_history를 PlanExecute 상태의 일부로 전달합니다.
+    graph_input = {
+        "input": message.content,
+        "chat_history": chat_history,
+        "summary": cl.user_session.get("summary", "") # 세션에서 요약본 로드
+    }
     
     # 2. 그래프 실행 및 UI 렌더링
     config = RunnableConfig(recursion_limit=100, thread_id=session_id, callbacks=[cl.LangchainCallbackHandler()])
@@ -262,11 +273,19 @@ async def on_message(message: cl.Message):
     final_response = None
     plan_msg = None
     agent_step = None # 현재 실행 중인 에이전트 스텝을 추적
+    updated_summary = "" # 업데이트된 요약본을 저장할 변수
 
     try:
         async for event in astream_events_with_retry(agent, graph_input, config):
             kind = event["event"]
             name = event["name"]
+
+            # 요약 노드에서 나온 업데이트된 요약본을 저장
+            if kind == "on_chain_end" and name == "summarizer":
+                if event["data"].get("output") and "summary" in event["data"]["output"]:
+                    updated_summary = event["data"]["output"]["summary"]
+                    cl.user_session.set("summary", updated_summary) # 세션에 저장
+                    print(f"[DEBUG] 요약 업데이트 완료 및 세션에 저장.")
 
             if kind == "on_chain_start":
                 if name == "planner":
@@ -331,7 +350,8 @@ async def on_message(message: cl.Message):
             db_utils.save_message(session_id, "assistant", final_response)
             if session_id in memory_manager.session_memory_store:
                 memory = memory_manager.session_memory_store[session_id]
-                memory.save_context({"input": message.content.strip()}, {"output": final_response})
+                # 사용자 메시지와 AI 응답을 함께 저장해야 맥락이 유지됩니다.
+                memory.save_context({"input": message.content}, {"output": final_response})
                 print(f"[DEBUG] 대화 저장 완료. 메모리 크기: {len(memory.load_memory_variables({})['chat_history'])}개")
         except Exception as e:
             print(f"[DEBUG] 최종 응답 저장 실패: {e}")

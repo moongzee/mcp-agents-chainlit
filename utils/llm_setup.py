@@ -12,6 +12,13 @@ from typing_extensions import TypedDict
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
+# --- 요약 기능 추가 ---
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+import anthropic
+import asyncio
+from httpx import ReadError as HttpxReadError
+from httpcore import ReadError as HttpcoreReadError
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 
 
 # --- 설정 파일 로드 ---
@@ -86,6 +93,8 @@ class PlanExecute(TypedDict):
     past_steps: Annotated[List[Tuple], operator.add]
     response: str
     routing_mode: str # 라우팅 모드를 저장 (general, feedback_report, cortex)
+    chat_history: List[BaseMessage] # 전체 대화 기록
+    summary: str # 누적 요약
 
 class Plan(BaseModel):
     """Planner가 생성할 계획의 구조입니다."""
@@ -103,6 +112,55 @@ class Act(BaseModel):
         description="수행할 액션입니다. 사용자에게 답변하려면 Response를, 추가 작업이 필요하면 Plan을 사용하세요."
     )
 
+
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    stop=stop_after_attempt(3),
+    retry=retry_if_exception_type((HttpxReadError, HttpcoreReadError, ConnectionError, anthropic.APIError))
+)
+async def create_intelligent_summary_silent(messages_to_summarize, existing_summary=None):
+    """API를 호출하여 의미있는 요약 생성"""
+    summary_model = ChatAnthropic(
+        model="claude-3-haiku-20240307",
+        temperature=0.1,
+        streaming=False,
+        timeout=60.0,
+        max_retries=2
+    )
+
+    # BaseMessage 객체에서 content 속성을 추출하여 텍스트로 변환
+    conversation_text = "\n\n".join(
+        f"{'사용자' if msg.type == 'human' else 'AI'}: {msg.content}"
+        for msg in messages_to_summarize
+    )
+
+    if existing_summary:
+        summary_prompt = f"""다음은 지금까지의 대화 요약과 새로 추가된 대화 내용입니다. 기존 요약을 바탕으로 새로운 대화 내용을 자연스럽게 통합하여 업데이트된 전체 요약본을 만들어주세요.
+
+[기존 요약]
+{existing_summary}
+
+[새로운 대화 내용]
+{conversation_text}
+
+[업데이트된 전체 요약]:"""
+    else:
+        summary_prompt = f"""다음 대화 내용을 한국어로 간결하게 핵심만 요약해주세요. 이 요약은 대화의 맥락을 유지하기 위한 내부 정보로 사용됩니다.
+
+[대화 내용]
+{conversation_text}
+
+[요약]:"""
+
+    try:
+        summary_response = await summary_model.ainvoke([HumanMessage(content=summary_prompt)])
+        summary_content = summary_response.content.strip()
+        print(f"[DEBUG] 요약 생성/업데이트 완료.")
+        return summary_content
+    except Exception as e:
+        print(f"[DEBUG] 요약 API 호출 실패: {e}")
+        # 오류 발생 시 기존 요약 또는 대체 텍스트 반환
+        return existing_summary or f"이전 대화 {len(messages_to_summarize)}개 (요약 생성 중 오류 발생)"
 
 
 ### LLM 모델 생성함수
@@ -158,6 +216,37 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
     replanner_llm = create_llm_model(model_name)
 
     # 4. 그래프 노드 정의
+    async def summarization_node(state: PlanExecute):
+        """대화 기록을 바탕으로 요약을 생성하거나 업데이트합니다."""
+        chat_history = state.get("chat_history", [])
+        existing_summary = state.get("summary", "")
+
+        # 요약은 대화 기록이 4개 이상일 때만 의미가 있습니다.
+        if len(chat_history) < 4:
+            print("[DEBUG] 대화 기록이 짧아 요약을 건너뜁니다.")
+            return {"summary": existing_summary, "chat_history": chat_history}
+
+        try:
+            # 요약 대상(마지막 2개 제외)과 유지할 최신 대화 분리
+            messages_to_summarize = chat_history[:-2]
+            recent_messages = chat_history[-2:]
+            
+            print(f"[DEBUG] 누적 요약 시작. 대상: {len(messages_to_summarize)}개, 유지: {len(recent_messages)}개")
+
+            updated_summary = await create_intelligent_summary_silent(messages_to_summarize, existing_summary)
+
+            # 요약본과 최신 대화로 새로운 대화 기록 구성
+            new_chat_history = [SystemMessage(content=f"--- 누적 요약 ---\n{updated_summary}")] + recent_messages
+            
+            print("[DEBUG] 요약 완료. 새로운 대화 기록으로 업데이트합니다.")
+            return {"summary": updated_summary, "chat_history": new_chat_history}
+
+        except Exception as e:
+            print(f"[ERROR] 요약 노드 실행 중 오류 발생: {e}")
+            # 오류 발생 시에도 원래 상태를 최대한 보존하여 다음 단계로 진행
+            return {"summary": existing_summary, "chat_history": chat_history}
+
+
     async def initial_router(state: PlanExecute):
         """사용자 입력에 따라 초기 라우팅 모드를 설정합니다."""
         # 사용자의 입력에서 공백을 제거하여 "정량피드백" 키워드를 유연하게 감지
@@ -165,15 +254,34 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
         if "정량피드백" in normalized_input:
             print("[DEBUG] '정량 피드백' 키워드 감지. 라우팅 모드를 'feedback_report'로 설정합니다.")
             mode = "feedback_report"
+            return {"routing_mode": mode}
         else:
             mode = "general"
-        return {"routing_mode": mode}
+            print("[DEBUG] 'general' 모드: Planner를 건너뛰고, 사용자 입력을 바로 실행 계획으로 설정합니다.")
+            return {"routing_mode": mode, "plan": [state["input"]]}
 
     async def execute_step(state: PlanExecute):
         """계획의 첫 단계를 실행합니다."""
         task = state["plan"][0]
-        agent_response = await agent_executor.ainvoke({"messages": [("user", task)]})
         
+        # 요약본과 대화 기록을 프롬프트에 포함하여 컨텍스트 강화
+        summary = state.get("summary", "")
+        chat_history = state.get("chat_history", [])
+        
+        # HumanMessage, AIMessage 등을 포함한 전체 대화 기록을 컨텍스트로 활용
+        context_messages = []
+        if summary:
+            context_messages.append(SystemMessage(content=f"--- 대화 요약 ---\n{summary}"))
+        
+        # chat_history에 있는 메시지를 그대로 사용
+        context_messages.extend(chat_history)
+        
+        # 현재 task를 HumanMessage로 추가
+        context_messages.append(HumanMessage(content=task))
+
+        # ReAct 에이전트 호출 시 messages 형식에 맞게 전달
+        agent_response = await agent_executor.ainvoke({"messages": context_messages})
+
         # 모델 응답이 리스트일 수 있는 경우를 처리 (Gemini 등)
         raw_content = agent_response["messages"][-1].content
         if isinstance(raw_content, list):
@@ -195,10 +303,17 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
     async def plan_step(state: PlanExecute):
         """사용자 입력을 바탕으로 계획 수립"""
         
+        # 시스템 프롬프트에 요약본 추가
+        summary = state.get("summary", "")
+        summary_prompt_part = ""
+        if summary:
+            summary_prompt_part = f"<CONVERSATION_SUMMARY>\n{summary}\n</CONVERSATION_SUMMARY>"
+
         # 기본 시스템 프롬프트 구성
         system_prompt_parts = [
             prompt_sections.get("ROLE", ""),
-            prompt_sections.get("GRAPH_OF_THOUGHTS_METHODOLOGY", "")
+            prompt_sections.get("GRAPH_OF_THOUGHTS_METHODOLOGY", ""),
+            summary_prompt_part # 요약 부분 추가
         ]
         # 기본 사용자 프롬프트
         user_prompt_template = "주어진 목표에 대해 5단계별 계획을 세워주세요. 마지막은 값이 맞는지 검증단계로 구성해주세요.: {input}"
@@ -227,11 +342,18 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
                 system_prompt_parts.append(final_instruction)
                 
             user_prompt_template = "다음 사용자 요청에 대한 실행 계획을 수립하세요: {input}"
-        
+            if routing_mode == "feedback_report":
+                user_prompt_template = "다음 사용자 요청에 대한 실행 계획을 수립하세요. 사용자가 언급한 특정 브랜드가 있다면, 각 계획 단계에 해당 브랜드를 명시적으로 포함해야 합니다. 예: '[브랜드명] 판매량 조회'. 요청: {input}"
+
         final_system_prompt = "\n".join(part for part in system_prompt_parts if part)
+        
+        # 대화 기록을 포함하여 Planner 호출
+        chat_history_for_planner = state.get("chat_history", [])
         
         planner_prompt = ChatPromptTemplate.from_messages([
             ("system", final_system_prompt),
+            # 이전 대화 내용도 함께 전달하여 맥락 이해도 높임
+            *chat_history_for_planner, 
             ("user", user_prompt_template),
         ])
 
@@ -247,12 +369,13 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
 
     async def replan_step(state: PlanExecute):
         """실행 결과를 바탕으로 계획을 수정하거나 최종 답변을 생성합니다."""
-        
-        # 최종 응답 생성 단계인지 확인
-        if len(state["plan"]) == 1:
-            routing_mode = state.get("routing_mode", "general")
-            config = ROUTING_CONFIG.get(routing_mode, ROUTING_CONFIG["general"])
-            
+        routing_mode = state.get("routing_mode", "general")
+        config = ROUTING_CONFIG.get(routing_mode, ROUTING_CONFIG["general"])
+        chat_history = state.get("chat_history", [])
+        summary = state.get("summary", "")
+
+        # General 모드일 때와, 다른 모드의 마지막 단계일 때 최종 응답 생성
+        if routing_mode == "general" or len(state["plan"]) <= 1:
             # 1. 기본 시스템 프롬프트 및 라우팅에 따른 응답 형식 로드
             final_prompt_parts = [
                 prompt_sections.get("ROLE", ""),
@@ -271,23 +394,63 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
             user_prompt_template = config["replanner_user_prompt"]
 
             final_prompt_str = "\n".join(part for part in final_prompt_parts if part)
-            final_prompt = ChatPromptTemplate.from_messages([
-                ("system", final_prompt_str),
-                ("user", user_prompt_template)
-            ])
             
-            # 최종 답변 생성
-            final_responder = final_prompt | replanner_llm
-            final_response = await final_responder.ainvoke({"input": state["input"], "past_steps": state["past_steps"]})
-            return {"response": final_response.content}
+            # 요약 및 대화 기록을 프롬프트에 추가
+            context_messages = []
+            if summary:
+                context_messages.append(SystemMessage(content=f"<대화 요약>\n{summary}\n</대화 요약>"))
+            context_messages.extend(chat_history)
+
+
+            # General 모드에서는 Act를 사용하여 Replan 또는 Response를 결정
+            if routing_mode == "general":
+                replanner_prompt = ChatPromptTemplate.from_messages([
+                    ("system", final_prompt_str + """
+You are a 'replanner'. Your role is to analyze the user's request and the execution history to determine the next action.
+Based on the provided `past_steps`, decide whether to provide a final response to the user or to revise the plan for further action.
+If the execution result is sufficient to answer the user's question, generate a final response using the `Response` model.
+If the result is insufficient or requires further steps, create a new plan using the `Plan` model.
+                    """),
+                    *context_messages, # 대화기록과 요약 추가
+                    ("user", user_prompt_template)
+                ])
+                
+                replanner = replanner_prompt | replanner_llm.with_structured_output(Act)
+                replanner_output = await replanner.ainvoke({"input": state["input"], "past_steps": state["past_steps"]})
+
+                if isinstance(replanner_output.action, Response):
+                    return {"response": replanner_output.action.response}
+                else:
+                    # 기존 plan은 사용자의 원래 입력이었으므로, 새로운 plan으로 완전히 교체합니다.
+                    # past_steps는 유지하여 다음 단계에서 컨텍스트를 잃지 않도록 합니다.
+                    return {"plan": replanner_output.action.steps}
+
+            # 다른 모드에서는 바로 최종 답변 생성
+            else:
+                final_prompt = ChatPromptTemplate.from_messages([
+                    ("system", final_prompt_str),
+                    *context_messages, # 대화기록과 요약 추가
+                    ("user", user_prompt_template)
+                ])
+                final_responder = final_prompt | replanner_llm
+                final_response = await final_responder.ainvoke({"input": state["input"], "past_steps": state["past_steps"]})
+                return {"response": final_response.content}
         
-        # 아직 계획을 더 실행해야 하는 경우
+        # 아직 계획을 더 실행해야 하는 경우 (non-general mode)
         else:
-            # 현재 계획에서 완료된 첫 번째 단계를 제외
             new_plan = state["plan"][1:]
             return {"plan": new_plan}
 
     # 5. 그래프 조건부 엣지(분기) 로직
+    def decide_after_summarization(state: PlanExecute):
+        """요약 노드 이후, 라우팅 모드에 따라 분기합니다."""
+        if state.get("routing_mode") == "general":
+            print("[DEBUG] 'general' 모드 감지. Planner를 건너뛰고 바로 agent로 이동합니다.")
+            return "agent"
+        else:
+            print(f"[DEBUG] '{state.get('routing_mode')}' 모드 감지. Planner로 이동합니다.")
+            return "planner"
+            
     def decide_after_planning(state: PlanExecute):
         """플래너가 계획을 생성했는지 여부에 따라 분기합니다."""
         if not state.get("plan"):
@@ -304,12 +467,22 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
     # 6. 그래프 구성
     workflow = StateGraph(PlanExecute)
     workflow.add_node("initial_router", initial_router)
+    workflow.add_node("summarizer", summarization_node) # 요약 노드 추가
     workflow.add_node("planner", plan_step)
     workflow.add_node("agent", execute_step)
     workflow.add_node("replan", replan_step)
 
     workflow.add_edge(START, "initial_router")
-    workflow.add_edge("initial_router", "planner")
+    
+    # initial_router -> summarizer로 직접 연결
+    workflow.add_edge("initial_router", "summarizer")
+
+    # summarizer 이후에 조건부 분기 추가
+    workflow.add_conditional_edges(
+        "summarizer",
+        decide_after_summarization,
+        {"planner": "planner", "agent": "agent"},
+    )
     
     # planner 이후에 조건부 분기 추가
     workflow.add_conditional_edges(
