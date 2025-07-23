@@ -59,7 +59,7 @@ allowed_executables = [ "npx", "uvx", "python", "docker"]
 
 [UI]
 # Name of the assistant.
-name = "NOA"
+name = "AGENTCHAT"
 
 language = "ko"
 

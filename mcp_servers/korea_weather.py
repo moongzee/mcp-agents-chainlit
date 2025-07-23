@@ -6,14 +6,14 @@ import urllib.parse
 import math
 import asyncio
 from mcp.server.fastmcp import FastMCP
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 import os
 import sys
 
 # Initialize FastMCP server
 mcp = FastMCP("korea_weather")
-
-KOREA_WEATHER_API_KEY = "NJZf0IxXtTO8vlgpcZ8TbyYzgziNOLkFbn8dWmvTRbx4AYWTjdPnpNd2nbroAcineXLi971rvGbpoy23qSMPmQ%3D%3D"
+load_dotenv(find_dotenv())
+KOREA_WEATHER_API_KEY = os.getenv("KOREA_WEATHER_API_KEY")
 
 # Lambert Conformal Conic Projection 파라미터
 class LambertConformalConic:

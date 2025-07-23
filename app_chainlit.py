@@ -205,7 +205,7 @@ async def on_chat_start():
     cl.user_session.set("mcp_tools", {})
     cl.user_session.set("message_count", 0)
     display_name = user.metadata.get("display_name", "사용자")
-    await cl.Message(content=f"안녕하세요 {display_name}님! NOA 입니다. 무엇이든 물어보세요 😊").send()
+    await cl.Message(content=f"안녕하세요 {display_name}님! 무엇이든 물어보세요 😊").send()
 
 @cl.on_chat_end
 async def on_chat_end():

@@ -14,7 +14,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NOA 데이터베이스 뷰어</title>
+    <title>데이터베이스 뷰어</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -140,7 +140,7 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <div class="header">
-            <h1>📊 NOA 데이터베이스 뷰어</h1>
+            <h1>📊 데이터베이스 뷰어</h1>
             <p>채팅 데이터베이스를 쉽게 조회하고 분석하세요</p>
         </div>
         
@@ -536,7 +536,7 @@ def execute_query():
         return jsonify({"error": str(e)})
 
 if __name__ == '__main__':
-    print("🚀 NOA 데이터베이스 뷰어 시작")
+    print("🚀 데이터베이스 뷰어 시작")
     print(f"📊 데이터베이스: {DB_PATH}")
     print("🌐 웹브라우저에서 http://localhost:5000 접속")
     print("⏹️  종료하려면 Ctrl+C 를 누르세요")
