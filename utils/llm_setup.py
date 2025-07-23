@@ -205,9 +205,22 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
     prompt_content = load_system_prompt(prompt_type)
     prompt_sections = parse_system_prompt(prompt_content)
     
+    # 실행 에이전트를 위한 시스템 프롬프트 구성
+    # general과 got_deep 프롬프트 모두 ROLE과 INSTRUCTIONS 섹션을 포함하므로 공통적으로 사용합니다.
+    # GRAPH_OF_THOUGHTS_METHODOLOGY는 Planner/Replanner에 더 적합하므로 실행 에이전트에서는 제외합니다.
+    execution_system_prompt_parts = [
+        prompt_sections.get("ROLE", ""),
+        prompt_sections.get("INSTRUCTIONS", ""),
+    ]
+    execution_system_prompt = "\n".join(part for part in execution_system_prompt_parts if part)
+    
     # 1. 실행 에이전트 (기존 ReAct 에이전트)
     execution_llm = create_llm_model(model_name)
-    agent_executor = create_react_agent(execution_llm, all_langchain_tools)
+    agent_executor = create_react_agent(
+        execution_llm, 
+        all_langchain_tools,
+        system_message=execution_system_prompt
+    )
 
     # 2. Planner LLM (will be used to build dynamic planners)
     planner_llm = create_llm_model(model_name)
