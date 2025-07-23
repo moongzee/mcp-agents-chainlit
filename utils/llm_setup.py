@@ -343,7 +343,7 @@ def create_plan_and_execute_graph(model_name: str, all_langchain_tools, prompt_t
                 
             user_prompt_template = "다음 사용자 요청에 대한 실행 계획을 수립하세요: {input}"
             if routing_mode == "feedback_report":
-                user_prompt_template = "다음 사용자 요청에 대한 실행 계획을 수립하세요. 사용자가 언급한 특정 브랜드가 있다면, 각 계획 단계에 해당 브랜드를 명시적으로 포함해야 합니다. 예: '[브랜드명] 판매량 조회'. 요청: {input}"
+                user_prompt_template = "다음 사용자 요청에 대한 실행 계획을 최대 5단계 수립하세요. 사용자가 언급한 특정 브랜드가 있다면, 각 계획 단계에 해당 브랜드를 명시적으로 포함해야 합니다. 예: '[브랜드명] 판매량 조회'. 요청: {input}"
 
         final_system_prompt = "\n".join(part for part in system_prompt_parts if part)
         
