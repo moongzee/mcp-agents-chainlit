@@ -36,3 +36,8 @@ python-dotenv==1.1.0
 requests==2.32.4
 tqdm==4.67.1
 flask
+
+# --- Google Calendar API ---
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

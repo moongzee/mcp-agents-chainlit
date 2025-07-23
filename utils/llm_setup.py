@@ -416,16 +416,17 @@ If the result is insufficient or requires further steps, create a new plan using
                 ])
                 
                 replanner = replanner_prompt | replanner_llm.with_structured_output(Act)
-                replanner_output = await replanner.ainvoke({"input": state["input"], "past_steps": state["past_steps"]})
+                
+                # 스트리밍 처리를 위해 astream 사용
+                response_chunks = []
+                async for chunk in replanner.astream({"input": state["input"], "past_steps": state["past_steps"]}):
+                    if isinstance(chunk.action, Response):
+                        yield {"response": chunk.action.response}
+                    elif isinstance(chunk.action, Plan):
+                        # Plan이 완전히 생성될 때까지 기다렸다가 반환
+                        yield {"plan": chunk.action.steps}
 
-                if isinstance(replanner_output.action, Response):
-                    return {"response": replanner_output.action.response}
-                else:
-                    # 기존 plan은 사용자의 원래 입력이었으므로, 새로운 plan으로 완전히 교체합니다.
-                    # past_steps는 유지하여 다음 단계에서 컨텍스트를 잃지 않도록 합니다.
-                    return {"plan": replanner_output.action.steps}
-
-            # 다른 모드에서는 바로 최종 답변 생성
+            # 다른 모드에서는 바로 최종 답변 스트리밍
             else:
                 final_prompt = ChatPromptTemplate.from_messages([
                     ("system", final_prompt_str),
@@ -433,13 +434,19 @@ If the result is insufficient or requires further steps, create a new plan using
                     ("user", user_prompt_template)
                 ])
                 final_responder = final_prompt | replanner_llm
-                final_response = await final_responder.ainvoke({"input": state["input"], "past_steps": state["past_steps"]})
-                return {"response": final_response.content}
-        
+                
+                # 스트리밍을 위해 astream 사용
+                response_content = ""
+                async for chunk in final_responder.astream({"input": state["input"], "past_steps": state["past_steps"]}):
+                    response_content += chunk.content
+                    yield {"response": response_content}
+                # 스트리밍 완료 후 추가적인 yield를 방지하여 루프 발생을 막습니다.
+                return
+
         # 아직 계획을 더 실행해야 하는 경우 (non-general mode)
         else:
             new_plan = state["plan"][1:]
-            return {"plan": new_plan}
+            yield {"plan": new_plan}
 
     # 5. 그래프 조건부 엣지(분기) 로직
     def decide_after_summarization(state: PlanExecute):
@@ -460,8 +467,10 @@ If the result is insufficient or requires further steps, create a new plan using
         
     def should_continue(state: PlanExecute) -> str:
         """계획이 남아있는지, 아니면 종료해야 하는지 결정합니다."""
-        if not state["plan"] or "response" in state and state["response"]:
+        if not state["plan"] or ("response" in state and state["response"]):
+            print("[DEBUG] 조건 확인(should_continue): 종료 조건 충족. (plan 없음 또는 response 있음)")
             return END
+        print("[DEBUG] 조건 확인(should_continue): 계속 진행. (plan 남음, response 없음)")
         return "agent"
 
     # 6. 그래프 구성
@@ -492,6 +501,13 @@ If the result is insufficient or requires further steps, create a new plan using
     )
     workflow.add_edge("agent", "replan")
     
-    workflow.add_conditional_edges("replan", should_continue, {END: END, "agent": "agent"})
+    workflow.add_conditional_edges(
+        "replan", 
+        should_continue, 
+        {
+            END: END, 
+            "agent": "agent"
+        }
+    )
 
     return workflow.compile() 

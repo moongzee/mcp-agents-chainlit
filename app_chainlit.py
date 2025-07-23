@@ -270,63 +270,95 @@ async def on_message(message: cl.Message):
     # 2. 그래프 실행 및 UI 렌더링
     config = RunnableConfig(recursion_limit=100, thread_id=session_id, callbacks=[cl.LangchainCallbackHandler()])
     
-    final_response = None
+    final_response = "" # 전체 응답을 저장할 변수 (스트리밍을 위해 ""로 초기화)
     plan_msg = None
     agent_step = None # 현재 실행 중인 에이전트 스텝을 추적
-    updated_summary = "" # 업데이트된 요약본을 저장할 변수
-
+    response_msg = cl.Message(content="", author="Assistant") # 스트리밍을 위한 빈 메시지 객체
+    
     try:
         async for event in astream_events_with_retry(agent, graph_input, config):
-            kind = event["event"]
-            name = event["name"]
+                kind = event["event"]
+                name = event["name"]
 
-            # 요약 노드에서 나온 업데이트된 요약본을 저장
-            if kind == "on_chain_end" and name == "summarizer":
-                if event["data"].get("output") and "summary" in event["data"]["output"]:
-                    updated_summary = event["data"]["output"]["summary"]
-                    cl.user_session.set("summary", updated_summary) # 세션에 저장
-                    print(f"[DEBUG] 요약 업데이트 완료 및 세션에 저장.")
+                if kind == "on_chain_start":
+                    if name == "planner":
+                        pass
+                        #await cl.Message(content="🤔 **계획 수립 중...**", author="System").send()
+                    elif name == "agent":
+                        plan = event["data"].get("input", {}).get("plan", [])
+                        if plan:
+                            task = plan[0]
+                            agent_step = cl.Step(name=f"🚀 실행: {task}", type="run")
+                            await agent_step.send()
+                    elif name == "replan":
+                        if agent_step:
+                            await agent_step.remove() # 이전 에이전트 스텝 UI 정리
+                            agent_step = None
+                        #await cl.Message(content="🔄 **계획 검토 및 다음 단계 준비 중...**", author="System").send()
 
-            if kind == "on_chain_start":
-                if name == "planner":
-                    pass
-                    #await cl.Message(content="🤔 **계획 수립 중...**", author="System").send()
-                elif name == "agent":
-                    plan = event["data"].get("input", {}).get("plan", [])
-                    if plan:
-                        task = plan[0]
-                        agent_step = cl.Step(name=f"🚀 실행: {task}", type="run")
-                        await agent_step.send()
-                elif name == "replan":
-                    if agent_step:
-                        await agent_step.remove() # 이전 에이전트 스텝 UI 정리
-                        agent_step = None
-                    #await cl.Message(content="🔄 **계획 검토 및 다음 단계 준비 중...**", author="System").send()
+                elif kind == "on_chain_stream":
+                    # 최종 응답 스트리밍 처리
+                    chunk = event["data"].get("chunk")
+                    response_chunk = None
+                    if isinstance(chunk, str):
+                        response_chunk = chunk
+                    elif isinstance(chunk, dict) and "response" in chunk:
+                        # LangChain의 Plan-and-Execute 그래프에서 최종 응답이 딕셔너리 형태로 올 수 있음
+                        response_chunk = chunk["response"]
 
-            elif kind == "on_chain_end":
-                if name == "planner":
-                    plan = event["data"].get("output", {}).get("plan", [])
-                    plan_text = "\n".join(f"- {step}" for step in plan)
-                    plan_msg = cl.Message(content=f"**📝 계획:**\n{plan_text}", author="System")
-                    await plan_msg.send()
-                elif name == "agent":
-                     if agent_step:
-                        result = event["data"].get("output", {}).get("past_steps", [("", "")])[-1][1]
-                        agent_step.output = result
-                        await agent_step.update()
-                elif name == "replan":
-                    output = event["data"].get("output", {})
-                    if "response" in output:
-                        final_response = output["response"]
-                    elif "plan" in output and plan_msg:
-                        new_plan = output["plan"]
-                        if not new_plan: # new_plan이 비어있으면 마지막 단계였다는 의미
-                            pass
+                    if response_chunk:
+                        # 에이전트의 청크가 누적된 전체 응답일 수 있으므로,
+                        # 이미 스트리밍된 부분(final_response)과 비교하여 새로운 부분(delta)만 스트리밍합니다.
+                        if response_chunk.startswith(final_response):
+                            delta = response_chunk[len(final_response):]
                         else:
-                            plan_text = "\n".join(f"- {step}" for step in new_plan)
-                            plan_msg.content = f"📝 **다음 계획:**\n{plan_text}"
-                            await plan_msg.update()
-    
+                            delta = response_chunk # 예상치 못한 경우, 그냥 청크 전체를 보냅니다.
+                        
+                        if delta:
+                            final_response += delta
+                            await response_msg.stream_token(delta)
+
+                elif kind == "on_chain_end":
+                    if name == "planner":
+                        plan = event["data"].get("output", {}).get("plan", [])
+                        if plan: # 빈 계획은 표시하지 않음
+                            plan_text = "\n".join(f"- {step}" for step in plan)
+                            plan_msg = cl.Message(content=f"**📝 계획:**\n{plan_text}", author="System")
+                            await plan_msg.send()
+                    elif name == "agent":
+                         if agent_step:
+                            result = event["data"].get("output", {}).get("past_steps", [("", "")])[-1][1]
+                            agent_step.output = result
+                            await agent_step.update()
+                    elif name == "replan" or name == "__end__" or name == "agent":
+                        output = event["data"].get("output", {})
+                        
+                        # 스트리밍이 이미 진행되었다면, 여기서는 특별한 처리를 하지 않습니다.
+                        if final_response:
+                            continue
+                        
+                        # 'replan', '__end__', 'agent' 노드 모두에서 최종 응답이 'response' 키로 전달될 수 있습니다.
+                        if "response" in output:
+                            final_response = output["response"]
+
+                        # 'replan'의 경우, 다음 계획을 업데이트합니다.
+                        elif "plan" in output and plan_msg:
+                            new_plan = output["plan"]
+                            if new_plan:
+                                plan_text = "\n".join(f"- {step}" for step in new_plan)
+                                plan_msg.content = f"📝 **다음 계획:**\n{plan_text}"
+                                await plan_msg.update()
+                            else:
+                                # 새로운 계획이 비어있으면, 모든 계획이 완료되었음을 의미하므로 UI를 정리합니다.
+                                await plan_msg.remove()
+        
+        # 스트리밍이 완료되었거나, 스트리밍 없이 최종 응답만 있는 경우 처리
+        if response_msg.content: 
+            await response_msg.update()
+        elif final_response: 
+             await cl.Message(content=final_response, author="Assistant").send()
+
+
     except (HttpxReadError, HttpcoreReadError, ConnectionError) as e:
         await ui_utils.send_error_with_reset_guidance("네트워크가 불안정하여 응답할 수 없습니다.", "네트워크"); return
     except (anthropic.APIStatusError, ServiceUnavailable) as e:
@@ -340,20 +372,37 @@ async def on_message(message: cl.Message):
     except Exception as e:
         print(f"[DEBUG] 예상치 못한 오류: {e}\n{traceback.format_exc()}")
         await ui_utils.send_critical_error_guidance(); return
-    
     if agent_step: await agent_step.remove()
-
     # 3. 최종 응답 및 메모리 저장
     if final_response:
-        await cl.Message(content=final_response, author="Assistant").send()
+        # await cl.Message(content=final_response, author="Assistant").send() # 스트리밍으로 대체되었으므로 주석 처리
         try:
             db_utils.save_message(session_id, "assistant", final_response)
             if session_id in memory_manager.session_memory_store:
                 memory = memory_manager.session_memory_store[session_id]
-                # 사용자 메시지와 AI 응답을 함께 저장해야 맥락이 유지됩니다.
-                memory.save_context({"input": message.content}, {"output": final_response})
+                memory.save_context({"input": message.content.strip()}, {"output": final_response})
                 print(f"[DEBUG] 대화 저장 완료. 메모리 크기: {len(memory.load_memory_variables({})['chat_history'])}개")
         except Exception as e:
             print(f"[DEBUG] 최종 응답 저장 실패: {e}")
-    else:
+    elif not response_msg.content: # 스트리밍도, 최종응답도 없는 경우
         await ui_utils.send_error_with_reset_guidance("응답 생성에 실패했습니다.", "일반"); return
+    
+    # 요약 업데이트 로직 추가
+    if final_response:
+        # 1. 현재 세션의 전체 대화 기록 가져오기
+        memory = memory_manager.session_memory_store.get(session_id)
+        chat_history_for_summary = []
+        if memory:
+            chat_history_for_summary = memory.load_memory_variables({}).get("chat_history", [])
+
+        # 2. 요약할 메시지가 충분히 있을 경우에만 요약 실행
+        if len(chat_history_for_summary) > 2:
+            try:
+                new_summary = await llm_setup.create_intelligent_summary_silent(
+                    messages_to_summarize=chat_history_for_summary,
+                    existing_summary=cl.user_session.get("summary", "")
+                )
+                cl.user_session.set("summary", new_summary)
+                print(f"[DEBUG] 대화 요약 업데이트 완료.")
+            except Exception as e:
+                print(f"[DEBUG] 대화 요약 업데이트 중 오류 발생: {e}")
