@@ -1,0 +1,43 @@
+# --- 핵심 프레임워크 ---
+chainlit==2.5.5
+langchain==0.3.25
+langchain-core==0.3.65
+langchain-anthropic==0.3.15
+google-ai-generativelanguage
+langchain-google-genai
+langchain-mcp-adapters==0.1.7
+langgraph==0.3.4
+langgraph-prebuilt==0.1.8
+langgraph-sdk==0.1.47
+langgraph-checkpoint==2.1.0
+openai
+
+# --- MCP 플랫폼 ---
+mcp==1.9.4
+
+# --- 데이터 처리 ---
+pandas==2.2.2
+numpy==1.26.4
+
+# --- 모델 설정 ---
+pydantic==2.7.4
+pydantic-core==2.18.4
+pydantic-settings==2.9.1
+typing-extensions
+
+# --- 웹/서버 ---
+fastapi==0.115.12
+uvicorn==0.25.0
+starlette==0.41.3
+
+# --- 기타 유틸 ---
+tenacity==8.2.3
+python-dotenv==1.1.0
+requests==2.32.4
+tqdm==4.67.1
+flask
+
+# --- Google Calendar API ---
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

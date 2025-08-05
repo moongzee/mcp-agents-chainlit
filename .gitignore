@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# 환경설정/시크릿
+.env
+*.env
+
+
+# 데이터베이스/로그
+*.db
+*.sqlite3
+*.log
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
+
+# 기타
+*.bak
+*.swp
+*.tmp
+
+# Jupyter
+.ipynb_checkpoints/
+
+# pycache in subfolders
+**/__pycache__/ 

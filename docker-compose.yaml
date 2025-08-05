@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  chainlit-mcp:
+    build: .
+    container_name: chainlit-mcp-agents
+    ports:
+      - "8000:8000"
+    volumes:
+      # Docker 소켓 마운트 (Docker 명령어 실행을 위해 필요)
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.env:/app/.env
+      - ./config.json:/app/config.json
+      - ./korea_weather.py:/app/korea_weather.py
+      - ./cortex_agents.py:/app/cortex_agents.py
+      - ./chat_history.db:/app/chat_history.db
+      - ./prompt:/app/prompt
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - CHAINLIT_HOST=0.0.0.0
+      - CHAINLIT_PORT=8000
+    # Docker 그룹에 추가 (Docker 명령어 실행 권한)
+    group_add:
+      - "999"  # docker 그룹 GID
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      - db-viewer
+
+  db-viewer:
+    build: .
+    container_name: simple-db-viewer
+    ports:
+      - "5000:5000"
+    volumes:
+      # 데이터베이스 파일 공유
+      - ./chat_history.db:/app/chat_history.db
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - FLASK_HOST=0.0.0.0
+      - FLASK_PORT=5000
+    command: ["python", "simple_db_viewer.py"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+# 볼륨 정의
+volumes:
+  app_data:
+    driver: local 

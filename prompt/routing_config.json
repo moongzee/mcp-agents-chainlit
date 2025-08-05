@@ -1,0 +1,18 @@
+{
+  "general": {
+    "planner_business_rules": [],
+    "response_format": "prompt/response_formats/general.txt",
+    "add_response_format_to_planner": false,
+    "planner_final_instruction": "",
+    "replanner_user_prompt": "다음 정보를 바탕으로 최종답변을 작성해주세요.\\n\\n사용자 질문: {input}\\n\\n지금까지의 작업 내역:\\n{past_steps}"
+  },
+  "feedback_report": {
+    "planner_business_rules": [
+      "prompt/business_rules/feedback_report.txt"
+    ],
+    "response_format": "prompt/response_formats/feedback_report.txt",
+    "add_response_format_to_planner": true,
+    "planner_final_instruction": "<BUSINESS_REPORT_FORMAT>을 참고하여, <BUSINESS_RULES>에 명시된 규칙을 준수하며, 수집된 데이터를 바탕으로 최종 보고서를 작성하기 위한 실행 계획을 세워주세요. 계획에는 데이터 검증, 분석, 인사이트 도출 및 최종 보고서 초안 생성 단계가 포함되어야 합니다. 보고서 생성시에는 cortex 도구를 사용하지 마세요. 마지막 단계는 생성된 보고서 초안이 모든 규칙과 형식에 맞는지 검증하는 단계로 구성해주세요.",
+    "replanner_user_prompt": "You are the final report writer. Your task is to synthesize the provided information into a report strictly following the loaded response format.Do not add any information that is not in the execution results. Fill the template with the data from the execution results.\\n\\nUser's original question: {input}\\n\\nExecution results:\\n{past_steps}"
+  }
+} 

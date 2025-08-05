@@ -1,0 +1,9 @@
+{
+  "cortex-agents": {
+    "command": "python",
+    "args": [
+      "mcp_servers/cortex_agents.py"
+    ],
+    "transport": "stdio"
+  }
+}

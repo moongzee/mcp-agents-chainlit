@@ -1,0 +1,55 @@
+/* Custom CSS for Chainlit UI */
+
+/* Hide original "Used LangGraph" text and replace with custom text */
+.step-header:has-text("Used LangGraph"),
+[data-testid*="step"]:has-text("Used LangGraph"),
+.MuiAccordionSummary-content:has-text("Used LangGraph") {
+    position: relative;
+}
+
+/* Try to hide and replace text using CSS (limited browser support) */
+.step-header:has-text("Used LangGraph")::before,
+[data-testid*="step"]:has-text("Used LangGraph")::before {
+    content: "🤔 생각중입니다";
+    position: absolute;
+    background: inherit;
+    z-index: 1;
+}
+
+/* Better approach - target specific classes if they exist */
+.chainlit-step-name,
+.step-name,
+.accordion-summary-text {
+    /* Will be handled by JavaScript */
+}
+
+/* Ensure timing information is visible */
+.step-timing,
+.duration-info {
+    font-size: 0.8rem;
+    color: #666;
+    font-style: italic;
+}
+
+/* Style for thinking indicator */
+.thinking-step {
+    border-left: 3px solid #4CAF50;
+    background-color: rgba(76, 175, 80, 0.1);
+    padding: 8px 12px;
+    border-radius: 4px;
+    margin: 4px 0;
+}
+
+/* Step completion indicator */
+.step-complete::after {
+    content: " ✅";
+}
+
+/* Enhanced step styling */
+.chainlit-step {
+    transition: all 0.2s ease;
+}
+
+.chainlit-step:hover {
+    background-color: rgba(0, 0, 0, 0.02);
+}
